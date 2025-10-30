@@ -285,8 +285,12 @@ bool TrackingProcessor::process(IEvent* ievent) {
             }
             else {
                 EVENT::Track* lc_truth_track = static_cast<EVENT::Track*> (lc_truth_tracks.at(0));
+                track->setID(lc_truth_track->id());
+
+                /*
                 Track* truth_track = utils::buildTrack(lc_truth_track,trackStateLocation_,nullptr,nullptr);
                 track->setTruthLink(truth_track);
+
 		if (bfield_>0)
 		  truth_track->setMomentum(bfield_);//this will overwrite the momentum; only use for pre-v3 slcio
                 //truth tracks phi needs to be corrected
@@ -294,6 +298,8 @@ bool TrackingProcessor::process(IEvent* ievent) {
                     truth_track->setPhi(truth_track->getPhi() - (TMath::Pi()) * 2.);
                 
                 truthTracks_.push_back(truth_track);
+                */
+
             }
             
         }
