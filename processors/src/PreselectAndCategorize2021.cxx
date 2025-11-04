@@ -61,11 +61,11 @@ std::vector<double> PreselectAndCategorize2021::determine_time_cuts(bool isData,
 
     if (isData) {
         // Apply data-specific time cuts
-        // time_cuts = {6.9, 5.2, 9.0}; // default values
-        time_cuts = {7.11, 5.3, 9.5};     // early runs
-        if (runNumber >= 14566) {         // bias voltage increased after this run, better time resolution
-            time_cuts = {6.7, 5.0, 8.8};  // later runs
-        }
+        time_cuts = {5.7, 4.91, 7.75}; // default values
+        //time_cuts = {7.11, 5.3, 9.5};     // early runs
+        //if (runNumber >= 14566) {         // bias voltage increased after this run, better time resolution
+        //    time_cuts = {6.7, 5.0, 8.8};  // later runs
+        //}
     } else {
         // Apply MC-specific time cuts
         // time_cuts = {9.8, 7.2, 14.1};  // MC with track time smearing
@@ -128,7 +128,7 @@ void PreselectAndCategorize2021::initialize(TTree* tree) {
         event_cf_.add("no_extra_true_ap", 3, 0.0, 2.0);
     }
     event_cf_.init();
-    std::vector<std::string> labels_event_cf = {"readout", "single3 trigger", "N_{vtx} >= 1", "N_{vtx} < 2"};
+    std::vector<std::string> labels_event_cf = {"readout", "single2 or 3 trigger", "N_{vtx} >= 1", "N_{vtx} < 20"};
     event_cf_.set_label_names(labels_event_cf);
 
     n_vertices_h_ = std::make_unique<TH2F>(
@@ -151,7 +151,7 @@ void PreselectAndCategorize2021::setFile(TFile* out_file) {
      ***************************************/
 
     // hit categories
-    for (const auto& name : {"eleL1", "eleL2", "posL1", "posL2"}) {
+    for (const auto& name : {"eleL1", "eleL2", "posL1", "posL2", "single2", "single3"}) {
         bus_.board_output<bool>(output_tree_.get(), name);
     }
 
@@ -197,8 +197,8 @@ bool PreselectAndCategorize2021::process(IEvent*) {
     // other triggers within it
     // MC is created with only this trigger AND the event header
     // is not updated so we need to skip this check for MC
-    event_cf_.apply("single_trigger", (tsbank.isSingle3Trigger()));
-    event_cf_.fill_nm1("single_trigger", (tsbank.isSingle3Trigger()) ? 1 : 0);
+    event_cf_.apply("single_trigger", ( tsbank.isSingle3Trigger() || tsbank.isSingle2Trigger() ));
+    event_cf_.fill_nm1("single_trigger", (tsbank.isSingle3Trigger() || tsbank.isSingle2Trigger()) ? 1 : 0);
     if (not event_cf_.keep()) {
         // we leave BEFORE filling the vertex counting histogram
         // so that the vertex count histogram is relative to this trigger
@@ -372,7 +372,7 @@ bool PreselectAndCategorize2021::process(IEvent*) {
     }
 
     n_vertices_h_->Fill(vtxs.size(), preselected_vtx.size());
-    event_cf_.apply("at_least_one_vertex", preselected_vtx.size() > 0);
+    event_cf_.apply("at_least_one_vertex", preselected_vtx.size() >= 1);
     event_cf_.apply("no_extra_vertices", preselected_vtx.size() < 2);
 
     event_cf_.fill_nm1("at_least_one_vertex", preselected_vtx.size());
@@ -380,6 +380,12 @@ bool PreselectAndCategorize2021::process(IEvent*) {
     if (not event_cf_.keep()) {
         return true;
     }
+
+    bool single2{false}, single3{false};
+    if (tsbank.isSingle3Trigger() == 1) single3 = true;
+    if (tsbank.isSingle2Trigger() == 1) single2 = true; 
+    bus_.set("single2", single2);
+    bus_.set("single3", single3);
 
     // correct number of vertices (i.e. only one)
     // unpack the vector of vertices into the single elements
