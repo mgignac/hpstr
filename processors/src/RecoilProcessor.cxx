@@ -1,13 +1,7 @@
 // ============================================================================
 // File: src/hpstr/processors/src/RecoilProcessor.cxx
-// Author: Emrys Peets, SLAC, Stanford
-// Truth matching priority:
-//   (A) Truth-Track-ID path (uses Track::getID() set from lc_truth_track->id())
-//   (B) Cluster MCPartIDs (ID-based per-hit association)
-//   (C) Layer-overlap fallback (no distances)
-// Denominator: truth-layer findability stays in MCParticle space.
-// Match rule: half-the-hits + truth findable at min threshold; front-layer single-hit exception.
-// PDG==13 kept.  Added TruthTracks reading + TT→MC mapping by layer overlap.
+// Cleaned: DEN by truth-hit counts; NUM by ID match + reco distinct-layer thresholds.
+// S/B per-threshold uses identical gates. Robust branch resolution & diagnostics.
 // ============================================================================
 
 #include "RecoilProcessor.h"
@@ -20,48 +14,28 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
-#include <sstream>
-
-#include <EVENT/SimTrackerHit.h>
-#include "TrackerHit.h"
 
 #include "TFile.h"
 #include "TTree.h"
 #include "TH1F.h"
 #include "TH2F.h"
-#include "TClass.h"
-#include "TBranch.h"
-#include "TBranchElement.h"
 #include "TEfficiency.h"
 #include "TMath.h"
-#include "TString.h" // Form
+#include "TString.h"
 
 namespace {
-    // Global diagnostics
-    TH1F* g_match_completeness     = nullptr;
-    TH1F* g_match_matchedLayers    = nullptr;
-    TH2F* g_comp_vs_purity         = nullptr;
-    TH1F* g_fakes_per_event        = nullptr;
-    TH1F* g_duplicates_per_event   = nullptr;
-    TH1F* g_missedLayers_per_event = nullptr;
-    TH1F* g_mixedHits_per_event    = nullptr;
-
-    static std::vector<std::string> list_branches(TTree* t) {
-        std::vector<std::string> out; if (!t) return out;
-        auto* lb = t->GetListOfBranches(); if (!lb) return out;
-        for (int i = 0; i < lb->GetEntries(); ++i) out.emplace_back(lb->At(i)->GetName());
-        return out;
-    }
-
-    // Simple resolver used twice (clusters & sim hits)
+    // Minimal helper to resolve first existing branch from candidates.
     static std::string resolve_branch(TTree* t, const std::vector<std::string>& candidates) {
-        for (const auto& c : candidates) if (t && t->GetBranch(c.c_str())) return c;
+        if (!t) return {};
+        for (const auto& c : candidates) {
+            if (t->GetBranch(c.c_str())) return c;
+        }
         return {};
     }
 }
 
 RecoilProcessor::RecoilProcessor(const std::string& name, Process& process)
-    : Processor(name,process) {}
+    : Processor(name, process) {}
 
 RecoilProcessor::~RecoilProcessor() {}
 
@@ -69,15 +43,14 @@ void RecoilProcessor::configure(const ParameterSet& parameters) {
     try {
         debug_     = parameters.getInteger("debug", debug_);
         anaName_   = parameters.getString("anaName", anaName_);
-        beamE_     = parameters.getDouble("beamE", (beamE_>0 ? beamE_ : 3.74));
+        beamE_     = parameters.getDouble("beamE", beamE_);
         sampleID_  = parameters.getInteger("sampleID", sampleID_);
         isData     = parameters.getInteger("isData", isData);
 
-        // Explicit cluster collection name
+        // Optional overrides
         sclusColl_ = parameters.getString("sclusColl", sclusColl_);
-        
-        // Name of the ROOT truth-track branch written by TrackingProcessor
         truthTracksCollRoot_ = parameters.getString("truthTrackCollRoot", truthTracksCollRoot_);
+        trkColl_   = parameters.getString("trkCollRoot", trkColl_); // allow configure to override default "GBLTracks"
     } catch (std::runtime_error& e) {
         std::cout << e.what() << std::endl;
     }
@@ -86,90 +59,50 @@ void RecoilProcessor::configure(const ParameterSet& parameters) {
 void RecoilProcessor::initialize(TTree* tree) {
     tree_ = tree;
 
-    // ---- SAFE BIND: required inputs
-    evth_ = nullptr;  bevth_ = nullptr;
-    mcParts_ = nullptr; bmcParts_ = nullptr;
-    trks_ = nullptr; btrks_ = nullptr;
-    mcTrkrHits_ = nullptr; bmcTrkrHits_ = nullptr;
+    // Bind must-haves
+    evth_     = nullptr;         bevth_     = nullptr;
+    mcParts_  = nullptr;         bmcParts_  = nullptr;
+    trks_     = nullptr;         btrks_     = nullptr;
+    mcTrkrHits_ = nullptr;       bmcTrkrHits_ = nullptr;
 
-    tree_->SetBranchAddress("EventHeader",       &evth_,        &bevth_);
-    tree_->SetBranchAddress("MCParticle",        &mcParts_,     &bmcParts_);
-    tree_->SetBranchAddress("KalmanFullTracks",  &trks_,        &btrks_);
+    // EventHeader
+    tree_->SetBranchAddress("EventHeader", &evth_, &bevth_);
 
-    /* --- Sim-hit branch: resolve common names; bind first that exists.
-       WHY: files differ ("TrackerSimHits","MCTrackerHits","SvtSimHits","TrackerHits"). */
+    // MCParticle (required)
+    tree_->SetBranchAddress("MCParticle", &mcParts_, &bmcParts_);
+
+    // Tracks (resolve)
+    {
+        std::vector<std::string> trkCandidates;
+        if (!trkColl_.empty()) trkCandidates.push_back(trkColl_);
+        trkCandidates.push_back("KalmanFullTracks");
+        trkCandidates.push_back("GBLTracks");
+        trkCandidates.push_back("Tracks");
+        const std::string trkName = resolve_branch(tree_, trkCandidates);
+        if (trkName.empty()) {
+            std::cerr << "[RecoilProcessor] FATAL: no track branch found.\n";
+        } else {
+            if (debug_>0) std::cout << "[RecoilProcessor] Using track branch: " << trkName << "\n";
+            tree_->SetBranchAddress(trkName.c_str(), &trks_, &btrks_);
+        }
+    }
+
+    // SimTrackerHits (resolve) — needed for DEN by truth HITS
     {
         const std::vector<std::string> simHitCandidates{
             "TrackerSimHits","MCTrackerHits","SvtSimHits","TrackerHits"
         };
         const std::string simHitName = resolve_branch(tree_, simHitCandidates);
-        if (!simHitName.empty()) {
+        if (simHitName.empty()) {
+            mcTrkrHits_ = nullptr; bmcTrkrHits_ = nullptr;
+            std::cerr << "[RecoilProcessor] WARNING: no sim-hit branch found; DEN by truth hits will be empty.\n";
+        } else {
             tree_->SetBranchAddress(simHitName.c_str(), &mcTrkrHits_, &bmcTrkrHits_);
             if (debug_>0) std::cout << "[RecoilProcessor] Using sim-hit branch: " << simHitName << "\n";
-        } else {
-            mcTrkrHits_ = nullptr; bmcTrkrHits_ = nullptr;
-            if (debug_>0) {
-                std::cout << "[RecoilProcessor] No sim-hit branch found; layer masks will rely on clusters/TT.\n";
-                std::cout << "[RecoilProcessor] Available branches:\n";
-                for (const auto& b : list_branches(tree_)) std::cout << "  - " << b << "\n";
-            }
         }
     }
 
-    /* ---- BEGIN SAFE TRUTH BRANCH (super-minimal) ---- */
-
-
-
-    truthTrks_  = nullptr;    // must be nullptr before binding
-    bTruthTrks_ = nullptr;
-    // Primary configured name, fallback to a common default
-    std::string ttName = truthTracksCollRoot_.empty() ? "Truth_KalmanTracks" : truthTracksCollRoot_;
-    if (tree_->GetBranch(ttName.c_str())) {
-        tree_->SetBranchAddress(ttName.c_str(), &truthTrks_, &bTruthTrks_);
-        if (debug_>0) std::cout << "[RecoilProcessor] Using truth-track branch: " << ttName << "\n";
-    } else {
-        // Auto-discover any branch that looks like truth-tracks
-        std::string autodetected;
-        auto names = list_branches(tree_);
-        for (auto& nm : names) {
-            std::string lo = nm; std::transform(lo.begin(), lo.end(), lo.begin(), ::tolower);
-            if (lo.find("truth") != std::string::npos && lo.find("track") != std::string::npos) { autodetected = nm; break; }
-        }
-        if (!autodetected.empty()) {
-            tree_->SetBranchAddress(autodetected.c_str(), &truthTrks_, &bTruthTrks_);
-            if (debug_>0) std::cout << "[RecoilProcessor] Auto-detected truth-track branch: " << autodetected << "\n";
-        } else if (debug_>0) {
-            std::cout << "[RecoilProcessor] No truth-track branch found; using MC/overlap fallbacks.\n";
-        }
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-//    truthTrks_  = nullptr;
-//    bTruthTrks_ = nullptr;
-//    // Default to a commonly used truth-track name if user didn't configure one.
-//    std::string ttName = truthTracksCollRoot_;
-//    if (ttName.empty()) ttName = "Truth_KalmanTracks";
-//    if (tree_->GetBranch(ttName.c_str())) {
-//        tree_->SetBranchAddress(ttName.c_str(), &truthTrks_, &bTruthTrks_);
-//        if (debug_>0) std::cout << "[RecoilProcessor] Using truth-track branch: " << ttName << "\n";
-//    } else {
-//        if (debug_>0) std::cout << "[RecoilProcessor] " << ttName
-//                                << " branch not found; primary Truth-Track-ID path will be skipped.\n";
-//    }
-    /* ---- END SAFE TRUTH BRANCH ---- */
-
-    // ---- Resolve a cluster collection
+    // Optional clusters (not required for logic)
     {
         std::vector<std::string> clusterCandidates;
         if (!sclusColl_.empty()) clusterCandidates.push_back(sclusColl_);
@@ -180,71 +113,76 @@ void RecoilProcessor::initialize(TTree* tree) {
         clusterCandidates.push_back("SiClusters");
         clusterCandidates.push_back("SvtClusters");
         const std::string sclusName = resolve_branch(tree_, clusterCandidates);
-        if (sclusName.empty()) {
-            std::cerr << "[RecoilProcessor] FATAL: no cluster branch found. Available:\n";
-            for (auto& b : list_branches(tree_)) std::cerr << "  - " << b << "\n";
-        } else {
-            if (debug_>0) std::cout << "[RecoilProcessor] Using cluster branch: " << sclusName << "\n";
+        if (!sclusName.empty()) {
             tree_->SetBranchAddress(sclusName.c_str(), &svtClusters_, &bsvtClusters_);
+            if (debug_>0) std::cout << "[RecoilProcessor] Using cluster branch: " << sclusName << "\n";
         }
     }
 
-    // ---- Output ROOT file + histos (unchanged below)
+    // Output file + histos
     outF_ = TFile::Open("recoil_extra.root", "RECREATE");
-    if (!outF_ || outF_->IsZombie()) { std::cerr << "[RecoilProcessor] ERROR opening output file.\n"; outF_ = nullptr; return; }
+    if (!outF_ || outF_->IsZombie()) {
+        std::cerr << "[RecoilProcessor] ERROR opening output file.\n";
+        outF_ = nullptr;
+        return;
+    }
     outF_->cd();
 
     const double maxP = (beamE_>0 ? beamE_ : 3.74);
-    h_rec_p_        = new TH1F("RecoilElectron_Momentum",    ";p (GeV);Counts", 100, 0., maxP);
-    h_rec_theta_    = new TH1F("RecoilElectron_Theta",       ";#theta (deg);Counts", 180, 0., 180.);
-    h_rec_vtz_      = new TH1F("RecoilElectron_VertexZ",     ";z_{vtx} (mm);Counts", 200, -20., 180.);
-    h_rec_tanlam_p_ = new TH2F("RecoilElectron_TanLambda_vs_P",";tan#lambda;p (GeV);Counts",100, -0.3, 0.3, 100, 0., maxP);
-    h_rec_nhits_    = new TH1F("RecoilElectron_nHits",       ";N truth hits;Counts", 20, -0.5, 19.5);
-    h_rec_tanlam_vs_nhits_ = new TH2F("RecoilElectron_TanLambda_vs_nhits_",";tan#lambda;N Truth Hits; Counts",100, -0.3, 0.3,20, -0.5, 19.5);
-
-    h_rad_p_        = new TH1F("RadiatedElectron_Momentum",  ";p (GeV);Counts", 100, 0., maxP);
-    h_rad_theta_    = new TH1F("RadiatedElectron_Theta",     ";#theta (deg);Counts", 180, 0., 180.);
-    h_rad_vtz_      = new TH1F("RadiatedElectron_VertexZ",   ";z_{vtx} (mm);Counts", 200, -20., 180.);
-    h_rad_tanlam_p_ = new TH2F("RadiatedElectron_TanLambda_vs_P",";tan#lambda;p (GeV);Counts",100, -0.3, 0.3, 100, 0., maxP);
-
     const int tanLBins = 100;  const double tanLMin=-0.3, tanLMax=0.3;
     const int pBins    = 100;  const double pMin=0.0, pMax=maxP;
 
+    h_rec_p_        = new TH1F("Recoil_Momentum",    ";p (GeV);Counts", 100, 0., maxP);
+    h_rec_theta_    = new TH1F("Recoil_Theta",       ";#theta (deg);Counts", 180, 0., 180.);
+    h_rec_vtz_      = new TH1F("Recoil_VertexZ",     ";z_{vtx} (mm);Counts", 200, -20., 180.);
+    h_rec_tanlam_p_ = new TH2F("Recoil_TanLambda_vs_P",";tan#lambda;p (GeV);Counts",100, -0.3, 0.3, 100, 0., maxP);
+    h_rec_nhits_    = new TH1F("Recoil_nTruthHits",  ";N truth hits;Counts", 40, -0.5, 39.5);
+    h_rec_tanlam_vs_nhits_ = new TH2F("Recoil_TanLambda_vs_nTruthHits",";tan#lambda;N Truth Hits; Counts",100, -0.3, 0.3,40, -0.5, 39.5);
+
+    h_rad_p_        = new TH1F("Radiated_Momentum",  ";p (GeV);Counts", 100, 0., maxP);
+    h_rad_theta_    = new TH1F("Radiated_Theta",     ";#theta (deg);Counts", 180, 0., 180.);
+    h_rad_vtz_      = new TH1F("Radiated_VertexZ",   ";z_{vtx} (mm);Counts", 200, -20., 180.);
+    h_rad_tanlam_p_ = new TH2F("Radiated_TanLambda_vs_P",";tan#lambda;p (GeV);Counts",100, -0.3, 0.3, 100, 0., maxP);
+
     for (int i = 0; i < kNThr_; ++i) {
         const int thr = thrList_[i];
-        eff_den_tanL_[i] = new TH1F(Form("EffDen_tanL_ge%d",thr), Form("Den: findable (>= %d truth layers);tan#lambda;count",thr), tanLBins, tanLMin, tanLMax);
-        eff_num_tanL_[i] = new TH1F(Form("EffNum_tanL_ge%d",thr), Form("Num: matched & >= %d layers;tan#lambda;count",thr), tanLBins, tanLMin, tanLMax);
-        eff_den_p_[i]    = new TH1F(Form("EffDen_p_ge%d",thr),    Form("Den: findable (>= %d truth layers);p (GeV);count",thr), pBins, pMin, pMax);
-        eff_num_p_[i]    = new TH1F(Form("EffNum_p_ge%d",thr),    Form("Num: matched & >= %d layers;p (GeV);count",thr), pBins, pMin, pMax);
+        eff_den_tanL_[i] = new TH1F(Form("EffDen_tanL_ge%d",thr), Form("Den: truth hits >= %d;tan#lambda;count",thr), tanLBins, tanLMin, tanLMax);
+        eff_num_tanL_[i] = new TH1F(Form("EffNum_tanL_ge%d",thr), Form("Num: matched & reco layers >= %d;tan#lambda;count",thr), tanLBins, tanLMin, tanLMax);
+        eff_den_p_[i]    = new TH1F(Form("EffDen_p_ge%d",thr),    Form("Den: truth hits >= %d;p (GeV);count",thr), pBins, pMin, pMax);
+        eff_num_p_[i]    = new TH1F(Form("EffNum_p_ge%d",thr),    Form("Num: matched & reco layers >= %d;p (GeV);count",thr), pBins, pMin, pMax);
     }
 
-    h_S_tanL_ = new TH1F("S_tanL", "Matched reco tracks (any);tan#lambda;S", tanLBins, tanLMin, tanLMax);
-    h_B_tanL_ = new TH1F("B_tanL", "Unmatched tracks (overlap or pure fake);tan#lambda;B", tanLBins, tanLMin, tanLMax);
-    h_S_p_    = new TH1F("S_p",    "Matched reco tracks (any);p (GeV);S",    pBins, pMin, pMax);
-    h_B_p_    = new TH1F("B_p",    "Unmatched tracks (overlap or pure fake);p (GeV);B",    pBins, pMin, pMax);
-
+    h_S_tanL_ = new TH1F("S_tanL", "Matched (ID in recoils);tan#lambda;S", tanLBins, tanLMin, tanLMax);
+    h_B_tanL_ = new TH1F("B_tanL", "Unmatched;tan#lambda;B", tanLBins, tanLMin, tanLMax);
+    h_S_p_    = new TH1F("S_p",    "Matched (ID in recoils);p (GeV);S",    pBins, pMin, pMax);
+    h_B_p_    = new TH1F("B_p",    "Unmatched;p (GeV);B",                  pBins, pMin, pMax);
     h_SoverSqrtB_tanL_ = nullptr;
     h_SoverSqrtB_p_    = nullptr;
 
-    h_match_purity_    = new TH1F("MatchPurity", "Track hit purity to matched recoil;purity;tracks", 50, 0.0, 1.0);
-    h_match_holes_     = new TH1F("MatchHoles",  "Missing truth layers on matched track;holes;tracks", kNLayersMax_+1, -0.5, kNLayersMax_+0.5);
-    h_vz_vs_purity_    = new TH2F("VZ_vs_Purity", "v_{z} vs purity;v_{z} (mm);purity", 200, -20., 180., 50, 0.0, 1.0);
-    h_tanL_vs_purity_  = new TH2F("TanL_vs_Purity", "tan#lambda vs purity;tan#lambda;purity", tanLBins, tanLMin, tanLMax, 50, 0.0, 1.0);
+    // Per-threshold S/B
+    for (int i = 0; i < kNThr_; ++i) {
+        const int thr = thrList_[i];
+        h_S_tanL_thr_[i] = new TH1F(Form("S_tanL_ge%d",thr),  Form("S (truth hits & reco layers >= %d);tan#lambda;S",thr), tanLBins, tanLMin, tanLMax);
+        h_B_tanL_thr_[i] = new TH1F(Form("B_tanL_ge%d",thr),  Form("B (else) >= %d;tan#lambda;B",thr), tanLBins, tanLMin, tanLMax);
+        h_S_p_thr_[i]    = new TH1F(Form("S_p_ge%d",thr),     Form("S (truth hits & reco layers >= %d);p (GeV);S",thr),    pBins, pMin, pMax);
+        h_B_p_thr_[i]    = new TH1F(Form("B_p_ge%d",thr),     Form("B (else) >= %d;p (GeV);B",thr),    pBins, pMin, pMax);
+        h_SoverSqrtB_tanL_thr_[i] = nullptr;
+        h_SoverSqrtB_p_thr_[i]    = nullptr;
+    }
 
-    g_match_completeness     = new TH1F("MatchCompleteness", "Truth-layer completeness on matched track;completeness;tracks", 50, 0.0, 1.0);
-    g_match_matchedLayers    = new TH1F("MatchMatchedLayers","Matched layers to recoil on matched track;# matched layers;tracks", kNLayersMax_+1, -0.5, kNLayersMax_+0.5);
-    g_comp_vs_purity         = new TH2F("Completeness_vs_Purity","Completeness vs purity;purity;completeness", 50, 0., 1., 50, 0., 1.);
-    g_fakes_per_event        = new TH1F("FakesPerEvent","Per-event fake tracks (>= minThr hits, not matched);count;events", 50, -0.5, 49.5);
-    g_duplicates_per_event   = new TH1F("DuplicatesPerEvent","Per-event duplicates (extra matches per recoil);count;events", 50, -0.5, 49.5);
-    g_missedLayers_per_event = new TH1F("MissedLayersPerEvent","Per-event sum of holes over matched tracks;holes;events", 200, -0.5, 199.5);
-    g_mixedHits_per_event    = new TH1F("MixedHitsPerEvent","Per-event sum of mixed hits over matched tracks;non-recoil hits;events", 500, -0.5, 499.5);
+    // Matching-quality (kept for compatibility; not heavily used here)
+    h_match_purity_   = new TH1F("MatchPurity", "purity;purity;tracks", 50, 0.0, 1.0);
+    h_match_holes_    = new TH1F("MatchHoles",  "holes;holes;tracks", kNLayersMax_+1, -0.5, kNLayersMax_+0.5);
+    h_vz_vs_purity_   = new TH2F("VZ_vs_Purity",";v_{z} (mm);purity", 200, -20., 180., 50, 0.0, 1.0);
+    h_tanL_vs_purity_ = new TH2F("TanL_vs_Purity",";tan#lambda;purity", tanLBins, tanLMin, tanLMax, 50, 0.0, 1.0);
 
-    h_B_overlap_tanL_ = new TH1F("Boverlap_tanL","Unmatched with truth overlap;tan#lambda;B", tanLBins, tanLMin, tanLMax);
-    h_B_overlap_p_    = new TH1F("Boverlap_p",   "Unmatched with truth overlap;p (GeV);B", pBins, pMin, pMax);
-    h_B_zero_tanL_    = new TH1F("Bzero_tanL",   "Unmatched with no truth (pure fake);tan#lambda;B", tanLBins, tanLMin, tanLMax);
-    h_B_zero_p_       = new TH1F("Bzero_p",      "Unmatched with no truth (pure fake);p (GeV);B", pBins, pMin, pMax);
+    h_B_overlap_tanL_ = new TH1F("Boverlap_tanL","Unmatched with overlap (not used here);tan#lambda;B", tanLBins, tanLMin, tanLMax);
+    h_B_overlap_p_    = new TH1F("Boverlap_p",   "Unmatched with overlap (not used here);p (GeV);B", pBins, pMin, pMax);
+    h_B_zero_tanL_    = new TH1F("Bzero_tanL",   "Unmatched pure fake (not used here);tan#lambda;B", tanLBins, tanLMin, tanLMax);
+    h_B_zero_p_       = new TH1F("Bzero_p",      "Unmatched pure fake (not used here);p (GeV);B", pBins, pMin, pMax);
 
-    recoilTree_ = new TTree("recoilTree","Truth‐level muon info");
+    // Tree
+    recoilTree_ = new TTree("recoilTree","Truth-level recoil info");
     recoilTree_->Branch("sampleID",   &tree_sampleID_,  "sampleID/I");
     recoilTree_->Branch("category",   &tree_category_,  "category/I");
     recoilTree_->Branch("pdg",        &tree_pdg_,       "pdg/I");
@@ -263,707 +201,518 @@ void RecoilProcessor::initialize(TTree* tree) {
 }
 
 bool RecoilProcessor::process(IEvent* /*ievent*/) {
-    if (!evth_ || !mcParts_ || !svtClusters_ || !trks_) {
-        std::cerr << "[RecoilProcessor] Missing required collections (MC/Clusters/Tracks)\n";
+    if (!evth_ || !mcParts_ || !trks_) {
+        std::cerr << "[RecoilProcessor] Missing required branches (EventHeader/MCParticle/Tracks)\n";
         return false;
     }
 
-    // --- Compute min threshold from fixed thrList_
-    int minThrLocal = thrList_[0];
-    for (int i = 1; i < kNThr_; ++i) minThrLocal = std::min(minThrLocal, thrList_[i]);
-
-    // ---- (1) Select recoils: PDG=13, remove beam-energy lepton
+    // === Select recoils (PDG filter). Change 13->11 if needed for electrons. ===
     const double ETOL  = 1e-3;
     const double BEAME = (beamE_>0 ? beamE_ : 3.74);
-
     std::vector<MCParticle*> recoils;
     recoils.reserve(mcParts_->size());
     for (auto* part : *mcParts_) {
         if (!part) continue;
-        if (std::abs(part->getPDG()) != 13) continue;
+        if (std::abs(part->getPDG()) != 13) continue;      // <- swap to 11 for electrons if desired
         if (std::abs(part->getEnergy() - BEAME) < ETOL) continue;
         recoils.push_back(part);
     }
     if (recoils.empty()) return true;
 
 
-{
-    // Collect reco track IDs once
-    std::unordered_set<int> trkIDs;
-    trkIDs.reserve(trks_->size());
-    for (auto* trk : *trks_) {
-        if (trk) trkIDs.insert(trk->getID());
+    // -- (1) Map pid -> MCParticle*
+std::unordered_map<int, MCParticle*> id2part;
+id2part.reserve(mcParts_->size());
+for (auto* p : *mcParts_) { if (p) id2part[p->getID()] = p; }
+
+// -- (2) nhit_denom: MCParticle* -> # MC tracker hits (truth hits)
+std::unordered_map<MCParticle*, int> nHits;
+if (mcTrkrHits_) {
+    nHits.reserve(id2part.size());
+    for (auto* hit : *mcTrkrHits_) {
+        if (!hit) continue;
+        const int pid = hit->getID();                // MCParticle ID on sim-hit
+        auto it = id2part.find(pid);
+        if (it != id2part.end()) nHits[it->second]++; // pointer-keyed (fast recoil lookup)
     }
+} else if (debug_ > 0) {
+    std::cout << "[RecoilProcessor] WARNING: mcTrkrHits_ is null; nHits[e]=0 for all.\n";
+}
 
-    // Fill DEN/NUM (no thresholds)
-    for (auto* part : recoils) {
-        if (!part) continue;
+// Helper: denominator nhits for a given MCParticle*
+auto nhitDenom = [&](MCParticle* e)->int {
+    auto it = nHits.find(e);
+    return (it != nHits.end()) ? it->second : 0;
+};
 
-        // MC kinematics for differential plots
-        const auto& mom = part->getMomentum();
-        const double tl = (mom[2] != 0.0) ? (mom[1] / mom[2]) : 999.;
-        const double p  = std::sqrt(mom[0]*mom[0] + mom[1]*mom[1] + mom[2]*mom[2]);
+// -- (3) Best distinct reco-layer count per Track::getID() (unchanged NUM logic)
+std::unordered_map<int,int> maxRecoLayersByTrkID;
+maxRecoLayersByTrkID.reserve(trks_->size());
+for (auto* trk : *trks_) {
+    if (!trk) continue;
+    std::array<bool,64> mask{}; mask.fill(false);
+    const int Nh = trk->getSvtHits().GetEntriesFast();
+    for (int ih=0; ih<Nh; ++ih) {
+        auto* th = static_cast<::TrackerHit*>(trk->getSvtHits().At(ih));
+        if (!th) continue;
+        const int L = th->getLayer();
+        if (0 <= L && L < kNLayersMax_) mask[L] = true;
+    }
+    int nL=0; for (int L=0; L<kNLayersMax_; ++L) if (mask[L]) ++nL;
+    const int tid = trk->getID();
+    auto it = maxRecoLayersByTrkID.find(tid);
+    if (it==maxRecoLayersByTrkID.end() || nL>it->second) maxRecoLayersByTrkID[tid] = nL;
+}
 
-        const bool matched = (trkIDs.find(part->getID()) != trkIDs.end());
+// -- (4) Recoil ID set (for S/B and quick membership)
+std::unordered_set<int> recoilIDs;
+recoilIDs.reserve(recoils.size());
+for (auto* r : recoils) if (r) recoilIDs.insert(r->getID());
 
-        // Fill ALL threshold histos identically (we are ignoring thresholds here)
-        for (int i = 0; i < kNThr_; ++i) {
+// -- (5) Efficiency DEN/NUM (DEN: nhit_denom only; NUM: reco-layers only)
+for (auto* e : recoils) {
+    if (!e) continue;
+
+    const auto& mom = e->getMomentum();
+    const double tl = (mom[2] != 0.0) ? (mom[1] / mom[2]) : 999.;   // keep efficiency x-axis continuity
+    const double p  = std::sqrt(mom[0]*mom[0] + mom[1]*mom[1] + mom[2]*mom[2]);
+
+    const int pid        = e->getID();
+    const int nh         = nhitDenom(e);                            // <-- DEN gate
+    const int bestRecoL  = (maxRecoLayersByTrkID.count(pid) ? maxRecoLayersByTrkID[pid] : 0);
+
+    // DEN: nhit_denom thresholds ONLY
+    for (int i = 0; i < kNThr_; ++i) {
+        const int thr = thrList_[i];
+        if (nh >= thr) {
             eff_den_tanL_[i]->Fill(tl);
             eff_den_p_[i]->Fill(p);
-            if (matched) {
+        }
+    }
+
+    // NUM: ID + best distinct reco-layers thresholds ONLY (decoupled from DEN)
+    if (bestRecoL > 0) {
+        for (int i = 0; i < kNThr_; ++i) {
+            const int thr = thrList_[i];
+            if (bestRecoL >= thr) {
                 eff_num_tanL_[i]->Fill(tl);
                 eff_num_p_[i]->Fill(p);
             }
         }
     }
+}
 
-    // Optional debug
-    if (debug_ > 0) {
-        std::cout << "[RecoilProcessor][SimpleID] Event " << evth_->getEventNumber()
-                  << "  mcRecoils=" << recoils.size()
-                  << "  trkIDs=" << trkIDs.size() << "\n";
+// -- (6) Global S/B (unchanged: membership only)
+for (auto* trk : *trks_) {
+    if (!trk) continue;
+    const bool isSig = (recoilIDs.count(trk->getID()) > 0);
+    const double tl = trk->getTanLambda();
+    const double pp = trk->getP();
+    if (isSig) { h_S_tanL_->Fill(tl); h_S_p_->Fill(pp); }
+    else       { h_B_tanL_->Fill(tl); h_B_p_->Fill(pp); }
+}
+
+// -- (7) Per-threshold S/B (by reco-layer thresholds only; mirrors NUM)
+for (auto* trk : *trks_) {
+    if (!trk) continue;
+    const int tid = trk->getID();
+    const bool isRecoil = (recoilIDs.count(tid) > 0);
+    const int bestRecoL = (maxRecoLayersByTrkID.count(tid) ? maxRecoLayersByTrkID[tid] : 0);
+    const double tl = trk->getTanLambda();
+    const double pp = trk->getP();
+
+    for (int i = 0; i < kNThr_; ++i) {
+        const int thr = thrList_[i];
+        if (isRecoil && bestRecoL >= thr) {
+            h_S_tanL_thr_[i]->Fill(tl);  h_S_p_thr_[i]->Fill(pp);
+        } else {
+            h_B_tanL_thr_[i]->Fill(tl);  h_B_p_thr_[i]->Fill(pp);
+        }
     }
+}
 
-    // Important: stop here so the detailed (layer-based) machinery doesn't double-fill
-    return true;
+// -- (8) Diagnostic denominator plots exactly like your snippet
+for (auto* e : recoils) {
+    if (!e) continue;
+    const int nh = nhitDenom(e);
+    h_rec_nhits_->Fill(nh);
+    const auto& mom = e->getMomentum();
+    const double pt   = std::hypot(mom[0], mom[1]);
+    const double tanL = (mom[2]!=0. ? pt/mom[2] : 999.);
+    h_rec_tanlam_vs_nhits_->Fill(tanL, nh);
+}
+
+// -- (9) Extra debug
+if (debug_ > 0) {
+    int shown = 0;
+    std::cout << "[RecoilProcessor] DEN nhit_denom summary (first few recoils): ";
+    for (auto* e : recoils) {
+        if (!e) continue;
+        std::cout << e->getID() << ":" << nhitDenom(e) << " ";
+        if (++shown == 8) break;
+    }
+    std::cout << "\n";
 }
 
 
 
-    // ---- (2) Truth masks
-    struct TruthInfo {
-        int nTruthLayers{0};
-        std::array<bool, 64> truthMask{};
-        double tl_true{999.};
-        double p_true{0.};
-    };
-    std::unordered_map<int,TruthInfo> truthByRecoil; truthByRecoil.reserve(recoils.size());
-    for (auto* recoil : recoils) {
-        TruthInfo ti; ti.truthMask.fill(false);
-        const auto& p = recoil->getMomentum();
-        ti.tl_true = (p[2]!=0.0) ? (p[1]/p[2]) : 999.;
-        ti.p_true  = std::sqrt(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]);
-        truthByRecoil[recoil->getID()] = std::move(ti);
-    }
-
-    // Detect if cluster collection has MCPartIDs
-    int clusters_with_mc = 0;
-    for (size_t i=0;i<svtClusters_->size();++i) {
-        auto* c = svtClusters_->at(i);
-        if (c && !c->getMCPartIDs().empty()) { clusters_with_mc++; break; }
-    }
-
-    if (clusters_with_mc > 0) {
-        for (auto* clu : *svtClusters_) {
-            if (!clu) continue;
-            const int L = clu->getLayer();
-            if (L < 0 || L >= kNLayersMax_) continue;
-            const auto& ids = clu->getMCPartIDs();
-            if (ids.empty()) continue;
-            for (int rid : ids) {
-                auto it = truthByRecoil.find(rid);
-                if (it == truthByRecoil.end()) continue;
-                it->second.truthMask[L] = true;
-            }
-        }
-    } else if (mcTrkrHits_) {
-        // Fallback: use sim-hits to mark truth layers (IDs must match MCParticle::getID()).
-        for (auto* sh : *mcTrkrHits_) {
-            if (!sh) continue;
-            const int rid = sh->getID();
-            const int L   = sh->getLayer();
-            if (L < 0 || L >= kNLayersMax_) continue;
-            auto it = truthByRecoil.find(rid);
-            if (it == truthByRecoil.end()) continue;
-            it->second.truthMask[L] = true;
-        }
-    }
-
-    // Recompute counts
-    
-    size_t totalTruthBits = 0;
-	for (auto& kv : truthByRecoil) {
-	    auto& ti = kv.second;
-	    ti.nTruthLayers = 0;
-	    for (int L = 0; L < kNLayersMax_; ++L) {
-		if (ti.truthMask[L]) {
-		    ti.nTruthLayers++;
-		    totalTruthBits++; // keep correct debug count
-		}
-	    }
-	}
-    
-    
-    if (debug_>0 && clusters_with_mc==0 && totalTruthBits==0) {
-        std::cout << "[RecoilProcessor] Using layer-overlap fallback (no MCPartIDs on clusters) and sim-hits yielded 0 truth bits.\n";
-    }
-
-
-    // --- Snapshot for denominator BEFORE any TT/track-based seeding to avoid circularity
-    auto truthByRecoil_DEN = truthByRecoil;
-
-
-
-
-        //  Fallback seeding from reco tracks' IDs when we have 0 truth bits and TT is missing/empty.
-	//  .err shows Track IDs align with MCParticle IDs, but TruthTrack branch is empty.
-	//      This seeds truth-layer masks so denominators (and numerators) can populate.
-	{
-	    const bool tt_empty = (!truthTrks_ || truthTrks_->empty());
-	    if (clusters_with_mc == 0 && totalTruthBits == 0 && tt_empty) {
-		// Build a quick set of recoil MC IDs we care about
-		std::unordered_set<int> recoilIDsSet;
-		recoilIDsSet.reserve(recoils.size());
-		for (auto* r : recoils) recoilIDsSet.insert(r->getID());
-
-		size_t seeds_applied = 0;
-
-		// OR the track's hit layers into the matching recoil (trkID == MCParticleID)
-		for (auto* trk : *trks_) {
-		    if (!trk) continue;
-		    const int tid = trk->getID();
-		    if (!recoilIDsSet.count(tid)) continue;          // only care about selected recoils
-
-		    auto itMC = truthByRecoil.find(tid);
-		    if (itMC == truthByRecoil.end()) continue;
-
-		    // Build layer mask from this track's hits
-		    std::array<bool, 64> tmask; tmask.fill(false);
-		    const int Nh = trk->getSvtHits().GetEntriesFast();
-		    for (int ih = 0; ih < Nh; ++ih) {
-			auto* th = static_cast<::TrackerHit*>(trk->getSvtHits().At(ih));
-			if (!th) continue;
-			const int L = th->getLayer();
-			if (0 <= L && L < kNLayersMax_) tmask[L] = true;
-		    }
-
-		    // Apply mask to the recoil's truth mask
-		    bool any = false;
-		    for (int L = 0; L < kNLayersMax_; ++L) {
-			if (tmask[L]) { itMC->second.truthMask[L] = true; any = true; }
-		    }
-		    if (any) seeds_applied++;
-		}
-
-		// Recompute counts & totalTruthBits after seeding
-		totalTruthBits = 0;
-		for (auto& kv : truthByRecoil) {
-		    auto& ti = kv.second;
-		    ti.nTruthLayers = 0;
-		    for (int L = 0; L < kNLayersMax_; ++L) {
-			if (ti.truthMask[L]) { ti.nTruthLayers++; totalTruthBits++; }
-		    }
-		}
-		if (debug_ > 0) {
-		    if (seeds_applied > 0 && totalTruthBits > 0)
-			std::cout << "[RecoilProcessor] Seeded truth-layer masks from reco Track IDs ("
-				  << seeds_applied << " seeds).\n";
-		    else
-			std::cout << "[RecoilProcessor] Track-ID seeding attempted but produced 0 truth bits.\n";
-		}
-	    }
-	}
-
-    // Build truth-track masks + TT→MC map by layer overlap
-    std::unordered_map<int, TruthInfo> truthByTruthTrackId;   // TT id -> mask/kin
-    std::unordered_map<int, int>       tt2mc_best;            // TT id -> MCParticle id
-    
-
-    // Quick set of recoil IDs for exact-ID mapping
-    std::unordered_set<int> recoilIDs;
-    recoilIDs.reserve(recoils.size());
-    for (auto* r : recoils) recoilIDs.insert(r->getID());
-
-
-
-    if (truthTrks_) {
-        truthByTruthTrackId.reserve(truthTrks_->size());
-        for (auto* tt : *truthTrks_) {
-            if (!tt) continue;
-            TruthInfo ti; ti.truthMask.fill(false);
-            for (int L : tt->getHitLayers()) if (0<=L && L<kNLayersMax_) ti.truthMask[L] = true;
-            ti.nTruthLayers = std::count(ti.truthMask.begin(), ti.truthMask.begin()+kNLayersMax_, true);
-            ti.tl_true = tt->getTanLambda();
-            ti.p_true  = tt->getP();
-            truthByTruthTrackId[ tt->getID() ] = std::move(ti);
-        }
-
-        // (1) Map by exact ID equality first (your .err shows trkIDs == MCParticle IDs)
-        // Map by exact ID equality first (trkID == TruthTrackID == MCParticleID)
-	for (const auto& kvTT : truthByTruthTrackId) {
-	    const int ttId = kvTT.first;
-	    if (recoilIDs.count(ttId)) {
-		tt2mc_best[ttId] = ttId;
-	    }
-	}
-	
-	// (2) Map remaining TTs by maximum layer overlap
-        for (const auto& kvTT : truthByTruthTrackId) {
-            const int ttId = kvTT.first; const auto& tiTT = kvTT.second;
-            if (tt2mc_best.count(ttId)) continue; // already mapped by equality
-	    int bestMc=-1, bestOv=-1;
-            for (const auto& kvMC : truthByRecoil) {
-                int ov=0; for (int L=0; L<kNLayersMax_; ++L) if (tiTT.truthMask[L] && kvMC.second.truthMask[L]) ov++;
-                if (ov>bestOv) { bestOv=ov; bestMc=kvMC.first; }
-            }
-            if (bestMc>=0 && bestOv>0) tt2mc_best[ttId]=bestMc;
-        }
-
-        // If clusters/sim-hits produced no truth bits, seed recoil masks from TruthTracks
-        bool needTTSeed = true;
-        for (const auto& kvMC : truthByRecoil) if (kvMC.second.nTruthLayers>0) { needTTSeed=false; break; }
-        if (needTTSeed) {
-            for (auto& kvMC : truthByRecoil) kvMC.second.truthMask.fill(false);
-            for (const auto& kvTT : truthByTruthTrackId) {
-                const int ttId = kvTT.first;
-                auto itMap = tt2mc_best.find(ttId);
-                if (itMap==tt2mc_best.end()) continue;
-                auto itMC = truthByRecoil.find(itMap->second);
-                if (itMC==truthByRecoil.end()) continue;
-                for (int L=0; L<kNLayersMax_; ++L)
-                    if (kvTT.second.truthMask[L]) itMC->second.truthMask[L] = true;
-            }
-            // Recompute counts
-            for (auto& kv : truthByRecoil) {
-                auto& ti = kv.second;
-                ti.nTruthLayers = 0;
-                for (int L=0; L<kNLayersMax_; ++L) ti.nTruthLayers += (ti.truthMask[L] ? 1 : 0);
-            }
-            if (debug_>0) std::cout << "[RecoilProcessor] Seeded truth-layer masks from TruthTracks.\n";
-        }
-
-
-    }
-
-    // ---- Denominator fill (robust): try TT-space first; if nothing filled, fall back to MC-space.
-    size_t denFilledCount = 0;
-    if (truthTrks_) {
-        for (const auto& kv : truthByTruthTrackId) {
-            const int ttId = kv.first; const auto& tiTT = kv.second;
-            auto itMap = tt2mc_best.find(ttId); if (itMap==tt2mc_best.end()) continue;
-            if (truthByRecoil.find(itMap->second)==truthByRecoil.end()) continue;
-            for (int t=0; t<kNThr_; ++t) {
-                const int thr = thrList_[t];
-                if (tiTT.nTruthLayers >= thr) {
-                    eff_den_tanL_[t]->Fill(tiTT.tl_true);
-                    eff_den_p_[t]->Fill(tiTT.p_true);
-                    denFilledCount++;
-                }
-            }
-        }
-    }
-   
-        if (!truthTrks_ || denFilledCount==0) {
-	    // Use the pre-seeded snapshot so DEN stays independent of matching inputs
-	    for (const auto& kv : truthByRecoil_DEN) {
-		const auto& ti = kv.second;
-		for (int t=0; t<kNThr_; ++t) {
-		    const int thr = thrList_[t];
-		    if (ti.nTruthLayers >= thr) {
-			eff_den_tanL_[t]->Fill(ti.tl_true);
-			eff_den_p_[t]->Fill(ti.p_true);
-		    }
-		}
-	    }
-	}
- 
-    
-    
-   // if (!truthTrks_ || denFilledCount==0) {
-   //     for (const auto& kv : truthByRecoil) {
-   //         const auto& ti = kv.second;
-   //         for (int t=0; t<kNThr_; ++t) {
-   //             const int thr = thrList_[t];
-   //             if (ti.nTruthLayers >= thr) {
-   //                 eff_den_tanL_[t]->Fill(ti.tl_true);
-   //                 eff_den_p_[t]->Fill(ti.p_true);
-   //             }
-   //         }
-   //     }
-   // }
-
-    // ---- (3) Map clusterID -> cluster* (for per-track hit lookup)
-    std::unordered_map<ULong64_t, ::TrackerHit*> id2cluster; id2cluster.reserve(svtClusters_->size());
-    for (size_t i=0;i<svtClusters_->size();++i) {
-        auto* c = svtClusters_->at(i);
-        if (!c) continue;
-        id2cluster[(ULong64_t)c->getID()] = c;
-    }
-    const bool useClusterMCIDs = (clusters_with_mc > 0);
-    if (!useClusterMCIDs && debug_>0) {
-        std::cerr << "[RecoilProcessor] Using layer-overlap fallback (no MCPartIDs on clusters).\n";
-    }
-
-    // ---- (4) Per-track association
-    struct AssocTrack {
-        const Track* trk{nullptr};
-        int bestRid{-1};
-        int totalHits{0};
-        int matchedHits{0};
-        int matchedLayers{0};
-        double purity{0.0};
-        double completeness{0.0};
-        double tanL{0.};
-        double p{0.};
-        bool hadAnyMC{false};
-        std::array<bool, 64> layerHasBest{};
-        int firstMCLayer{-1};
-        int totalHitsWithAnyMC{0};
-    };
-    auto score = [&](const AssocTrack& a)->double{
-        return 0.6*a.purity + 0.3*a.completeness + 0.1*(double(a.matchedLayers)/double(kNLayersMax_));
-    };
-    const double kPurityCut = 0.0;  // OFF
-
-    std::unordered_map<int, std::vector<AssocTrack>> candidatesByRecoil; // mc rid -> candidates
-    candidatesByRecoil.reserve(recoils.size());
-    int eventFakes = 0, eventDuplicates = 0, eventMissed = 0, eventMixed = 0;
-
-    for (auto* trk : *trks_) {
-        if (!trk) continue;
-        const int T = trk->getSvtHits().GetEntriesFast();
-        if (T <= 0) continue;
-
-        // Build track layer mask and per-hit layer list
-        std::array<bool, 64> trackLayerMask{}; trackLayerMask.fill(false);
-        std::vector<int> trackHitLayers; trackHitLayers.reserve(T);
-        for (int ih=0; ih<T; ++ih) {
-            auto* th = static_cast<::TrackerHit*>(trk->getSvtHits().At(ih));
-            if (!th) continue;
-            const int L = th->getLayer();
-            if (L >= 0 && L < kNLayersMax_) {
-                trackLayerMask[L] = true;
-                trackHitLayers.push_back(L);
-            }
-        }
-
-        struct Acc { int hits=0; std::array<bool,64> L{}; Acc(){L.fill(false);} };
-        std::unordered_map<int, Acc> accByRid; // mc rid -> counts
-        bool hadAnyTruth = false;
-        int  assocUnits  = 0;
-        int  onlyAssocLayer = -1;
-
-        // --- (A) Truth-Track-ID path (now using TT→MC mapping)
-        bool usedTruthIdPath = false;
-        if (truthTrks_) {
-            const int ttId_from_track = trk->getID(); // set by TrackingProcessor to truth track id
-            auto itMap = tt2mc_best.find(ttId_from_track);
-            if (itMap != tt2mc_best.end()) {
-                const int mcRid = itMap->second;
-                auto itTruthMC = truthByRecoil.find(mcRid);
-                if (itTruthMC != truthByRecoil.end()) {
-                    usedTruthIdPath = true;
-                    const auto& tiMC = itTruthMC->second;
-
-                    Acc a;
-                    for (int L = 0; L < kNLayersMax_; ++L) {
-                        if (trackLayerMask[L] && tiMC.truthMask[L]) a.L[L] = true;
-                    }
-                    int matchedHitsCount = 0;
-                    for (int L_hit : trackHitLayers) {
-                        if (L_hit >= 0 && L_hit < kNLayersMax_ && a.L[L_hit]) matchedHitsCount++;
-                    }
-                    a.hits = matchedHitsCount;
-
-                    if (a.hits > 0) {
-                        hadAnyTruth = true;
-                        assocUnits  = a.hits;
-                        if (a.hits == 1) {
-                            for (int L=0; L<kNLayersMax_; ++L) { if (a.L[L]) { onlyAssocLayer = L; break; } }
-                        }
-                    }
-                    accByRid[mcRid] = a; // downstream remains in MCParticle id space
-                }
-            }
-        }
-
-        // --- (B) Cluster MCPartIDs path
-        if (!usedTruthIdPath && useClusterMCIDs) {
-            int total_hits_with_any_mc = 0;
-            int only_mc_hit_layer = -1;
-            for (int ih=0; ih<T; ++ih) {
-                auto* th = static_cast<::TrackerHit*>(trk->getSvtHits().At(ih));
-                if (!th) continue;
-                auto itc = id2cluster.find((ULong64_t)th->getID());
-                if (itc == id2cluster.end()) continue;
-                ::TrackerHit* clu = itc->second;
-                const int L = clu->getLayer();
-                const auto& mcids = clu->getMCPartIDs();
-                if (!mcids.empty()) {
-                    hadAnyTruth = true;
-                    total_hits_with_any_mc++;
-                    if (total_hits_with_any_mc == 1) only_mc_hit_layer = L;
-                }
-                for (int rid : mcids) {
-                    auto itTruth = truthByRecoil.find(rid);
-                    if (itTruth == truthByRecoil.end()) continue;
-                    auto& slot = accByRid[rid];
-                    slot.hits += 1;
-                    if (L>=0 && L<kNLayersMax_) slot.L[L] = true;
-                }
-            }
-            assocUnits     = total_hits_with_any_mc;
-            onlyAssocLayer = only_mc_hit_layer;
-        }
-
-        // --- (C) Layer-overlap fallback across all recoils
-        if (!usedTruthIdPath && !useClusterMCIDs) {
-            int bestRidLoc = -1, bestOverlap = -1;
-            for (const auto& kvTruth : truthByRecoil) {
-                const int rid = kvTruth.first;
-                const auto& ti = kvTruth.second;
-                int overlap = 0;
-                for (int L=0; L<kNLayersMax_; ++L) {
-                    if (trackLayerMask[L] && ti.truthMask[L]) overlap++;
-                }
-                if (overlap > bestOverlap) { bestOverlap = overlap; bestRidLoc = rid; }
-            }
-            if (bestRidLoc >= 0 && bestOverlap > 0) {
-                hadAnyTruth = true;
-                assocUnits  = bestOverlap;
-                if (bestOverlap == 1) {
-                    for (int L=0; L<kNLayersMax_; ++L) {
-                        if (trackLayerMask[L] && truthByRecoil[bestRidLoc].truthMask[L]) { onlyAssocLayer = L; break; }
-                    }
-                }
-                Acc a;
-                for (int L=0; L<kNLayersMax_; ++L) {
-                    if (trackLayerMask[L] && truthByRecoil[bestRidLoc].truthMask[L]) a.L[L] = true;
-                }
-                int matchedHitsCount = 0;
-                for (int L_hit : trackHitLayers) {
-                    if (L_hit >= 0 && L_hit < kNLayersMax_ && a.L[L_hit]) matchedHitsCount++;
-                }
-                a.hits = matchedHitsCount;
-                accByRid[bestRidLoc] = a;
-            }
-        }
-
-        // --- Choose best rid by hits then layers
-        int bestRid = -1, bestHits = -1, bestLayers = -1;
-        for (const auto& kv : accByRid) {
-            const int rid = kv.first;
-            const auto& a = kv.second;
-            int layers=0; for (int L=0; L<kNLayersMax_; ++L) layers += (a.L[L]?1:0);
-            if (a.hits > bestHits || (a.hits==bestHits && layers>bestLayers)) {
-                bestRid = rid; bestHits = a.hits; bestLayers = layers;
-            }
-        }
-
-        // --- Build AssocTrack and downstream logic
-        AssocTrack AT;
-        AT.trk            = trk;
-        AT.bestRid        = bestRid;
-        AT.totalHits      = T;
-        AT.matchedHits    = (bestRid>=0 ? bestHits : 0);
-        AT.matchedLayers  = (bestRid>=0 ? bestLayers : 0);
-        AT.purity         = (T>0 ? double(AT.matchedHits)/double(T) : 0.0);
-        AT.hadAnyMC       = hadAnyTruth;
-        AT.tanL           = trk->getTanLambda();
-        AT.p              = trk->getP();
-        AT.layerHasBest.fill(false);
-        AT.firstMCLayer   = onlyAssocLayer;
-        AT.totalHitsWithAnyMC = assocUnits;
-
-        if (bestRid>=0) {
-            const auto& Lmask = accByRid[bestRid].L;
-            for (int L=0; L<kNLayersMax_; ++L) AT.layerHasBest[L] = Lmask[L];
-            const auto& ti = truthByRecoil[bestRid];
-            AT.completeness = (ti.nTruthLayers>0 ? double(AT.matchedLayers)/double(ti.nTruthLayers) : 0.0);
-        }
-
-        // ---- Decide per-track S/B and candidate status ----
-        bool anyTruth = (AT.matchedLayers > 0);
-
-        bool truthFindableAtMin = (AT.bestRid>=0) && (truthByRecoil[AT.bestRid].nTruthLayers >= minThrLocal);
-        bool halfHits           = (AT.bestRid>=0) && (AT.matchedHits >= (AT.totalHits+1)/2);
-        bool matched            = (halfHits && truthFindableAtMin);
-
-        bool front_single_mc = (AT.totalHitsWithAnyMC == 1) && (AT.firstMCLayer == 0 || AT.firstMCLayer == 1);
-
-        if (matched) {
-            h_S_tanL_->Fill(AT.tanL);
-            h_S_p_->Fill(AT.p);
-        } else {
-            if ( anyTruth || (!anyTruth && AT.totalHits >= minThrLocal) ) {
-                h_B_tanL_->Fill(AT.tanL);
-                h_B_p_->Fill(AT.p);
-            }
-            if (anyTruth) { h_B_overlap_tanL_->Fill(AT.tanL); h_B_overlap_p_->Fill(AT.p); }
-            else if (AT.totalHits >= minThrLocal) { h_B_zero_tanL_->Fill(AT.tanL); h_B_zero_p_->Fill(AT.p); }
-        }
-
-        if (matched) {
-            candidatesByRecoil[AT.bestRid].push_back(AT);
-        } else {
-            if (!front_single_mc && AT.totalHits >= minThrLocal && anyTruth) eventFakes += 1;
-        }
-    }
-
-    // Duplicates: extra candidates per recoil
-    for (const auto& kv : candidatesByRecoil) {
-        const int n = (int)kv.second.size();
-        if (n>1) eventDuplicates += (n-1);
-    }
-
-    // ---- (5) Choose best per recoil; fill NUM and diagnostics
-    for (auto* recoil : recoils) {
-        const int rid = recoil->getID();
-        auto trIt = truthByRecoil.find(rid);
-        if (trIt == truthByRecoil.end()) continue;
-        const auto& ti = trIt->second;
-
-        auto candIt = candidatesByRecoil.find(rid);
-        if (candIt == candidatesByRecoil.end() || candIt->second.empty()) continue;
-
-        const AssocTrack* best = &candIt->second[0];
-        for (const auto& a : candIt->second) if (score(a) > score(*best)) best = &a;
-
-        int holes = 0;
-        for (int L=0; L<kNLayersMax_; ++L) {
-            if (!ti.truthMask[L]) continue;
-            if (!best->layerHasBest[L]) holes++;
-        }
-
-        h_match_purity_->Fill(best->purity);
-        h_match_holes_->Fill(holes);
-        h_tanL_vs_purity_->Fill(best->tanL, best->purity);
-        h_vz_vs_purity_->Fill(recoil->getVertexPosition()[2], best->purity);
-
-        g_match_completeness->Fill(best->completeness);
-        g_match_matchedLayers->Fill(best->matchedLayers);
-        g_comp_vs_purity->Fill(best->purity, best->completeness);
-
-        eventMissed += holes;
-        eventMixed  += (best->totalHits - best->matchedHits);
-
-        // Fill numerator for thresholds, prefer TT kinematics if consistent; else MC kinematics.
-        for (int t=0; t<kNThr_; ++t) {
-            const int need = thrList_[t];
-            if (best->matchedLayers < need) continue;
-            bool filled=false;
-            if (truthTrks_) {
-                const int ttId = best->trk ? best->trk->getID() : -1; // Track::getID()==TruthTrack id
-                auto itMap = tt2mc_best.find(ttId);
-                if (ttId>=0 && itMap!=tt2mc_best.end() && itMap->second==rid) {
-                    auto itTT = truthByTruthTrackId.find(ttId);
-                    if (itTT!=truthByTruthTrackId.end() && itTT->second.nTruthLayers>=need) {
-                        eff_num_tanL_[t]->Fill(itTT->second.tl_true);
-                        eff_num_p_[t]->Fill(itTT->second.p_true);
-                        filled=true;
-                    }
-                }
-            }
-            if (!filled && ti.nTruthLayers>=need) {
-                eff_num_tanL_[t]->Fill(ti.tl_true);
-                eff_num_p_[t]->Fill(ti.p_true);
-            }
-        }
-    }
-
-    // ---- (6) Trees & simple kinematics
-    std::unordered_map<int,MCParticle*> id2part; id2part.reserve(mcParts_->size());
-    for (auto* p : *mcParts_) if (p) id2part[p->getID()] = p;
-
-    std::unordered_map<MCParticle*,int> mcTruthHits;
-    if (mcTrkrHits_) {
-        for (auto* hit : *mcTrkrHits_) {
-            if (!hit) continue;
-            int pid = hit->getID();
-            auto it = id2part.find(pid);
-            if (it != id2part.end()) mcTruthHits[it->second]++;
-        }
-    }
-
-    auto fillTree = [&](MCParticle* e, int category){
-        tree_sampleID_  = sampleID_;
-        tree_category_  = category;
-        tree_pdg_       = e->getPDG();
-        tree_OriginPDG_ = e->getOriginPDG();
-        tree_MomPDG_    = e->getMomPDG();
-        tree_charge_    = e->getCharge();
-        tree_ID_        = e->getID();
-
-        auto mom = e->getMomentum();
-        tree_px_       = mom[0];
-        tree_py_       = mom[1];
-        tree_pz_       = mom[2];
-        tree_p_        = std::sqrt(mom[0]*mom[0]+mom[1]*mom[1]+mom[2]*mom[2]);
-        tree_pt_       = std::sqrt(mom[0]*mom[0]+mom[1]*mom[1]);
-        tree_tanLambda_= (tree_pz_!=0 ? tree_py_/tree_pz_ : 999.);
-        tree_theta_    = std::atan2(tree_pt_,tree_pz_) * TMath::RadToDeg();
-
-        tree_energy_   = e->getEnergy();
-        tree_mass_     = e->getMass();
-        tree_time_     = e->getTime();
-        tree_vz_       = e->getVertexPosition()[2];
-
-        tree_nHits_    = mcTruthHits[e];
-        tree_eventID_  = evth_->getEventNumber();
-        tree_x_        = 1.0 - (e->getEnergy() / beamE_);
-        tree_phi_      = std::atan2(tree_py_, tree_px_);
-
-        recoilTree_->Fill();
-    };
-
-    for (auto* e : recoils)  fillTree(e, 0); // category=0 for recoils
-
-    auto fillKin = [&](MCParticle* ele, bool isRecoil) {
-        const auto& mom = ele->getMomentum();
-        double px=mom[0], py=mom[1], pz=mom[2];
-        double p  = std::sqrt(px*px + py*py + pz*pz);
-        double pt = std::sqrt(px*px + py*py);
-        double tanL = (pz != 0 ? py/pz : 999.);
-        double thetaDeg = std::atan2(pt,pz)*TMath::RadToDeg();
-        const auto& vtx = ele->getVertexPosition(); double vz = (vtx.size()>2)? vtx[2] : 0.;
-        if (isRecoil) { h_rec_p_->Fill(p); h_rec_theta_->Fill(thetaDeg); h_rec_vtz_->Fill(vz); h_rec_tanlam_p_->Fill(tanL, p); }
-        else          { h_rad_p_->Fill(p); h_rad_theta_->Fill(thetaDeg); h_rad_vtz_->Fill(vz); h_rad_tanlam_p_->Fill(tanL, p); }
-    };
-    for (auto* e : recoils)  fillKin(e, true);
-
-    for (auto* e : recoils) {
-        int nh = mcTruthHits[e];
-        h_rec_nhits_->Fill(nh);
-        auto mom=e->getMomentum();
-        double tanL = (mom[2]!=0. ? mom[1]/mom[2] : 999.);
-        h_rec_tanlam_vs_nhits_->Fill(tanL, nh);
-    }
-
-    // ---- (7) Per-event diagnostics
-    g_fakes_per_event->Fill(eventFakes);
-    g_duplicates_per_event->Fill(eventDuplicates);
-    g_missedLayers_per_event->Fill(eventMissed);
-    g_mixedHits_per_event->Fill(eventMixed);
-
-    if (debug_>0) {
-        std::cout << "[RecoilProcessor] Event " << evth_->getEventNumber()
-                  << "  recoils=" << recoils.size()
-                  << "  clusters_with_mc=" << clusters_with_mc
-                  << "  fakes=" << eventFakes
-                  << "  duplicates=" << eventDuplicates
-                  << "  missed(sum)=" << eventMissed
-                  << "  mixed(sum)=" << eventMixed << "\n";
-    }
-
-    if (debug_>1) {
-        std::cerr << "Example trk IDs (TruthTrack IDs): ";
-        int shown=0; for (auto* trk : *trks_) { std::cerr << trk->getID() << " "; if (++shown==10) break; }
-        std::cerr << "\nExample TruthTrack IDs (from branch): ";
-        shown=0; if (truthTrks_) { for (auto* tt : *truthTrks_) { std::cerr << tt->getID() << " "; if (++shown==10) break; } }
-        std::cerr << "\nExample MCParticle IDs: ";
-        shown=0; for (auto* p : *mcParts_) { std::cerr << p->getID() << " "; if (++shown==10) break; }
-        std::cerr << "\n";
-    }
+
+
+
+
+
+
+
+// -- (G) Tree: store nhit_denom exactly as requested --------------------------
+for (auto* e : recoils) {
+    if (!e) continue;
+
+    tree_sampleID_  = sampleID_;
+    tree_category_  = 0;
+    tree_pdg_       = e->getPDG();
+    tree_OriginPDG_ = e->getOriginPDG();
+    tree_MomPDG_    = e->getMomPDG();
+    tree_charge_    = e->getCharge();
+    tree_ID_        = e->getID();
+
+    auto mom = e->getMomentum();
+    tree_px_ = mom[0]; tree_py_ = mom[1]; tree_pz_ = mom[2];
+    tree_p_  = std::sqrt(mom[0]*mom[0] + mom[1]*mom[1] + mom[2]*mom[2]);
+    tree_pt_ = std::sqrt(mom[0]*mom[0] + mom[1]*mom[1]);
+    tree_tanLambda_ = (tree_pz_!=0 ? tree_py_/tree_pz_ : 999.);
+    tree_theta_     = std::atan2(tree_pt_,tree_pz_) * TMath::RadToDeg();
+    tree_energy_    = e->getEnergy();
+    tree_mass_      = e->getMass();
+    tree_time_      = e->getTime();
+    const auto& vtx = e->getVertexPosition();
+    tree_vz_        = (vtx.size()>2) ? vtx[2] : 0.0f;
+
+    const int nh = nhitDenom(e);             // <- nhit_denom stored in tree
+    tree_nHits_   = nh;
+    tree_eventID_ = evth_->getEventNumber();
+    tree_x_       = 1.0f - float(e->getEnergy() / beamE_);
+    tree_phi_     = std::atan2(tree_py_, tree_px_);
+    recoilTree_->Fill();
+
+    const double tanL = (mom[2] != 0.0) ? (mom[1]/mom[2]) : 999.;
+    h_rec_p_->Fill(tree_p_);
+    h_rec_theta_->Fill(tree_theta_);
+    h_rec_vtz_->Fill(tree_vz_);
+    h_rec_tanlam_p_->Fill(tanL, tree_p_);
+    h_rec_nhits_->Fill(nh);
+    if (nh > 0) h_rec_tanlam_vs_nhits_->Fill(tanL, nh);
+}
+
+// -- (H) Debug ---------------------------------------------------------------
+if (debug_ > 0) {
+    std::cout << "[RecoilProcessor][nhit_denom] Event " << evth_->getEventNumber()
+              << " recoils=" << recoils.size()
+              << " trks="    << (trks_ ? trks_->size() : 0)
+              << " mcTrkrHits=" << (mcTrkrHits_ ? mcTrkrHits_->size() : 0)
+              << " nHitsMap=" << nHits.size()
+              << "\n";
+}
+// ============================================================================
+// End patch
+
+
+
+
+
+
+//// === DROP-IN: place inside RecoilProcessor::process(), after you build `recoils` ===
+//// Assumes: trks_, mcTrkrHits_, eff_den_*[], eff_num_*[], h_S_*[], h_B_*[], h_*_thr_[],
+////          thrList_[kNThr_], kNLayersMax_, and your existing histos are already defined.
+//
+///* 0) Fast bailouts */
+////if (!trks_ || recoils.empty()) return true;
+//
+///* 1) Fast ID set for simple matching */
+//std::unordered_set<int> trkIDs;
+//trkIDs.reserve(trks_->size());
+//for (auto* trk : *trks_) if (trk) trkIDs.insert(trk->getID());
+//
+///* 2) Best distinct reco-layer count per Track::getID() (handles duplicates) */
+//std::unordered_map<int,int> maxRecoLayersByTrkID;
+//maxRecoLayersByTrkID.reserve(trks_->size());
+//for (auto* trk : *trks_) {
+//    if (!trk) continue;
+//    std::array<bool,64> mask{}; mask.fill(false);
+//    const int Nh = trk->getSvtHits().GetEntriesFast();
+//    for (int ih=0; ih<Nh; ++ih) {
+//        auto* th = static_cast<::TrackerHit*>(trk->getSvtHits().At(ih));
+//        if (!th) continue;
+//        const int L = th->getLayer();
+//        if (0 <= L && L < kNLayersMax_) mask[L] = true;
+//    }
+//    int nL = 0; for (int L=0; L<kNLayersMax_; ++L) if (mask[L]) ++nL;
+//    const int tid = trk->getID();
+//    auto it = maxRecoLayersByTrkID.find(tid);
+//    if (it==maxRecoLayersByTrkID.end() || nL>it->second) maxRecoLayersByTrkID[tid] = nL;
+//}
+//
+///* 3) Truth *hit* counts per MC pid for DEN (safe fallback if missing) */
+//std::unordered_map<int,int> truthHitCountByPid;
+//bool haveTruthHits = false;
+//if (mcTrkrHits_) {
+//    truthHitCountByPid.reserve(4096);
+//    for (auto* hit : *mcTrkrHits_) {
+//        if (!hit) continue;
+//        const int pid = hit->getID();      // expected: MCParticle ID
+//        truthHitCountByPid[pid] += 1;
+//    }
+//    haveTruthHits = !truthHitCountByPid.empty();
+//}
+//// Gate helper: if no sim-hits, DEN gate returns true so histos still fill.
+//auto passTruthThr = [&](int pid, int thr)->bool {
+//    if (!haveTruthHits) return true;              // fallback: always in DEN
+//    auto it = truthHitCountByPid.find(pid);
+//    const int n = (it!=truthHitCountByPid.end() ? it->second : 0);
+//    return n >= thr;
+//};
+//auto truthHits = [&](int pid)->int {
+//    auto it = truthHitCountByPid.find(pid);
+//    return (it!=truthHitCountByPid.end() ? it->second : 0);
+//};
+//
+///* 4) Recoil MC ID set (for S/B) */
+//std::unordered_set<int> recoilIDs;
+//recoilIDs.reserve(recoils.size());
+//for (auto* r : recoils) if (r) recoilIDs.insert(r->getID());
+//
+///* 5) Efficiency DEN/NUM with thresholds (DEN by truth hits, NUM by reco layers) */
+//for (auto* part : recoils) {
+//    if (!part) continue;
+//
+//    const auto& mom = part->getMomentum();
+//    const double tl = (mom[2] != 0.0) ? (mom[1] / mom[2]) : 999.;
+//    const double p  = std::sqrt(mom[0]*mom[0] + mom[1]*mom[1] + mom[2]*mom[2]);
+//
+//    const int pid = part->getID();
+//    const bool matched = (trkIDs.find(pid) != trkIDs.end());
+//    const int nRecoLay = (maxRecoLayersByTrkID.count(pid) ? maxRecoLayersByTrkID[pid] : 0);
+//
+//    for (int i = 0; i < kNThr_; ++i) {
+//        const int thr = thrList_[i];
+//
+//        if (passTruthThr(pid, thr)) {               // DEN gate (truth hits or fallback)
+//            eff_den_tanL_[i]->Fill(tl);
+//            eff_den_p_[i]->Fill(p);
+//
+//            if (matched && nRecoLay >= thr) {       // NUM gate (ID match + reco layers)
+//                eff_num_tanL_[i]->Fill(tl);
+//                eff_num_p_[i]->Fill(p);
+//            }
+//        }
+//    }
+//}
+//
+///* 6) Global S/B (ID membership only; unchanged semantics) */
+//for (auto* trk : *trks_) {
+//    if (!trk) continue;
+//    const bool isSig = (recoilIDs.count(trk->getID()) > 0);
+//    const double tl = trk->getTanLambda();
+//    const double pp = trk->getP();
+//    if (isSig) { h_S_tanL_->Fill(tl); h_S_p_->Fill(pp); }
+//    else       { h_B_tanL_->Fill(tl); h_B_p_->Fill(pp); }
+//}
+//
+///* 7) Per-threshold S/B (same gates as NUM) */
+//for (auto* trk : *trks_) {
+//    if (!trk) continue;
+//    const int tid = trk->getID();
+//    const bool isRecoil = (recoilIDs.count(tid) > 0);
+//    const int nRecoLay  = (maxRecoLayersByTrkID.count(tid) ? maxRecoLayersByTrkID[tid] : 0);
+//    const double tl = trk->getTanLambda();
+//    const double pp = trk->getP();
+//
+//    for (int i = 0; i < kNThr_; ++i) {
+//        const int thr = thrList_[i];
+//        if (isRecoil && passTruthThr(tid, thr) && nRecoLay >= thr) {
+//            h_S_tanL_thr_[i]->Fill(tl);  h_S_p_thr_[i]->Fill(pp);
+//        } else {
+//            h_B_tanL_thr_[i]->Fill(tl);  h_B_p_thr_[i]->Fill(pp);
+//        }
+//    }
+//}
+//
+//
+//auto bestRecoLayersFor = [&](int pid)->int {
+//    auto it = maxRecoLayersByTrkID.find(pid);
+//    return (it != maxRecoLayersByTrkID.end()) ? it->second : 0;
+//};
+
+
+
+    //// === Distinct reco-layer count per Track::getID() (best over dups) ===
+    //std::unordered_map<int,int> maxRecoLayersByTrkID;
+    //maxRecoLayersByTrkID.reserve(trks_->size());
+    //for (auto* trk : *trks_) {
+    //    if (!trk) continue;
+    //    std::array<bool,64> mask{}; mask.fill(false);
+    //    const int Nh = trk->getSvtHits().GetEntriesFast();
+    //    for (int ih=0; ih<Nh; ++ih) {
+    //        auto* th = static_cast<::TrackerHit*>(trk->getSvtHits().At(ih));
+    //        if (!th) continue;
+    //        const int L = th->getLayer();
+    //        if (0 <= L && L < kNLayersMax_) mask[L] = true;
+    //    }
+    //    int nL=0; for (int L=0; L<kNLayersMax_; ++L) if (mask[L]) ++nL;
+    //    const int tid = trk->getID();                   // set by TrackingProcessor to truth ID
+    //    auto it = maxRecoLayersByTrkID.find(tid);
+    //    if (it==maxRecoLayersByTrkID.end() || nL>it->second) maxRecoLayersByTrkID[tid]=nL;
+    //}
+
+    //// === Truth *hit* counts per pid (DEN) ===
+    //std::unordered_map<int,int> truthHitCountByPid;
+    //if (mcTrkrHits_) {
+    //    truthHitCountByPid.reserve(4096);
+    //    for (auto* hit : *mcTrkrHits_) {
+    //        if (!hit) continue;
+    //        const int pid = hit->getID();               // MCParticle ID carried on hit
+    //        truthHitCountByPid[pid] += 1;
+    //    }
+    //} else if (debug_>0) {
+    //    std::cout << "[RecoilProcessor] No sim-hits bound; denominators will be zero.\n";
+    //}
+    //auto nTruthHits = [&](int pid)->int {
+    //    auto it = truthHitCountByPid.find(pid);
+    //    return (it != truthHitCountByPid.end()) ? it->second : 0;
+    //};
+
+    //// === Set of recoil IDs (for S/B) ===
+    //std::unordered_set<int> recoilIDs;
+    //recoilIDs.reserve(recoils.size());
+    //for (auto* r : recoils) if (r) recoilIDs.insert(r->getID());
+
+    //// === Efficiency DEN/NUM (DEN by truth-hits; NUM by reco-layer thresholds) ===
+    //for (auto* part : recoils) {
+    //    if (!part) continue;
+
+    //    const auto& mom = part->getMomentum();
+    //    const double tl = (mom[2] != 0.0) ? (mom[1] / mom[2]) : 999.;
+    //    const double p  = std::sqrt(mom[0]*mom[0] + mom[1]*mom[1] + mom[2]*mom[2]);
+
+    //    const int pid = part->getID();
+    //    const int hitsTruth = nTruthHits(pid);
+    //    const int recoLay   = (maxRecoLayersByTrkID.count(pid) ? maxRecoLayersByTrkID[pid] : 0);
+
+    //    for (int i = 0; i < kNThr_; ++i) {
+    //        const int thr = thrList_[i];
+    //        if (hitsTruth >= thr) {
+    //            eff_den_tanL_[i]->Fill(tl);
+    //            eff_den_p_[i]->Fill(p);
+    //            if (recoLay >= thr) {
+    //                eff_num_tanL_[i]->Fill(tl);
+    //                eff_num_p_[i]->Fill(p);
+    //            }
+    //        }
+    //    }
+    //}
+
+    //// === Global S/B (ID membership only) ===
+    //for (auto* trk : *trks_) {
+    //    if (!trk) continue;
+    //    const bool isSig = (recoilIDs.count(trk->getID()) > 0);
+    //    const double tl = trk->getTanLambda();
+    //    const double pp = trk->getP();
+    //    if (isSig) { h_S_tanL_->Fill(tl); h_S_p_->Fill(pp); }
+    //    else       { h_B_tanL_->Fill(tl); h_B_p_->Fill(pp); }
+    //}
+
+    //// === Per-threshold S/B (truth hits + reco layers + ID) ===
+    //for (auto* trk : *trks_) {
+    //    if (!trk) continue;
+    //    const int tid = trk->getID();
+    //    const bool isRecoil = (recoilIDs.count(tid) > 0);
+    //    const int hitsTruth = nTruthHits(tid);
+    //    const int recoLay   = (maxRecoLayersByTrkID.count(tid) ? maxRecoLayersByTrkID[tid] : 0);
+    //    const double tl = trk->getTanLambda();
+    //    const double pp = trk->getP();
+
+    //    for (int i = 0; i < kNThr_; ++i) {
+    //        const int thr = thrList_[i];
+    //        if (isRecoil && hitsTruth >= thr && recoLay >= thr) {
+    //            h_S_tanL_thr_[i]->Fill(tl);  h_S_p_thr_[i]->Fill(pp);
+    //        } else {
+    //            h_B_tanL_thr_[i]->Fill(tl);  h_B_p_thr_[i]->Fill(pp);
+    //        }
+    //    }
+    //}
+
+
+
+//// === Tree & kinematics (use truth hits; fallback to reco-layer count) ===
+//for (auto* e : recoils) {
+//    if (!e) continue;
+//
+//    tree_sampleID_  = sampleID_;
+//    tree_category_  = 0;
+//    tree_pdg_       = e->getPDG();
+//    tree_OriginPDG_ = e->getOriginPDG();
+//    tree_MomPDG_    = e->getMomPDG();
+//    tree_charge_    = e->getCharge();
+//    tree_ID_        = e->getID();
+//
+//    auto mom = e->getMomentum();
+//    tree_px_ = mom[0]; tree_py_ = mom[1]; tree_pz_ = mom[2];
+//    tree_p_  = std::sqrt(mom[0]*mom[0] + mom[1]*mom[1] + mom[2]*mom[2]);
+//    tree_pt_ = std::sqrt(mom[0]*mom[0] + mom[1]*mom[1]);
+//    tree_tanLambda_ = (tree_pz_!=0 ? tree_py_/tree_pz_ : 999.);
+//    tree_theta_     = std::atan2(tree_pt_,tree_pz_) * TMath::RadToDeg();
+//    tree_energy_    = e->getEnergy();
+//    tree_mass_      = e->getMass();
+//    tree_time_      = e->getTime();
+//    const auto& vtx = e->getVertexPosition();
+//    tree_vz_        = (vtx.size()>2) ? vtx[2] : 0.0f;
+//
+//    const int pid = e->getID();
+//    const int nTruth = truthHits(pid);
+//    const int nRecoL = bestRecoLayersFor(pid);
+//    const int nh     = (haveTruthHits ? nTruth : nRecoL);   // fallback so it always fills
+//
+//    tree_nHits_     = nh;                                   // stored as "nHits" in tree
+//    tree_eventID_   = evth_->getEventNumber();
+//    tree_x_         = 1.0f - float(e->getEnergy() / beamE_);
+//    tree_phi_       = std::atan2(tree_py_, tree_px_);
+//    recoilTree_->Fill();
+//
+//    const double tanL = (mom[2] != 0.0) ? (mom[1]/mom[2]) : 999.;
+//    h_rec_p_->Fill(tree_p_);
+//    h_rec_theta_->Fill(tree_theta_);
+//    h_rec_vtz_->Fill(tree_vz_);
+//    h_rec_tanlam_p_->Fill(tanL, tree_p_);
+//    h_rec_nhits_->Fill(nh);
+//    if (nh > 0) h_rec_tanlam_vs_nhits_->Fill(tanL, nh);
+//}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     return true;
 }
 
 void RecoilProcessor::finalize() {
-    if (!outF_ || !outF_->IsOpen()) { std::cerr << "[RecoilProcessor] finalize(): output not open\n"; return; }
+    if (!outF_ || !outF_->IsOpen()) {
+        std::cerr << "[RecoilProcessor] finalize(): output not open\n";
+        return;
+    }
     outF_->cd();
     auto writeIf = [](TObject* o){ if (o) o->Write(); };
 
-    // Make S/sqrt(B) overlays
+    // Global S/√B
     auto makeSoverSqrtB = [](TH1F* S, TH1F* B, const char* name, const char* title)->TH1F*{
         TH1F* R = (TH1F*)S->Clone(name); R->SetTitle(title);
         for (int i=1;i<=R->GetNbinsX();++i) {
@@ -976,17 +725,44 @@ void RecoilProcessor::finalize() {
     h_SoverSqrtB_tanL_ = makeSoverSqrtB(h_S_tanL_, h_B_tanL_, "SoverSqrtB_tanL", "S/#sqrt{B} vs tan#lambda");
     h_SoverSqrtB_p_    = makeSoverSqrtB(h_S_p_,    h_B_p_,    "SoverSqrtB_p" ,   "S/#sqrt{B} vs p");
 
-    // Write trees and histos
-    writeIf(recoilTree_);
+    // Per-threshold S/√B
+    for (int i = 0; i < kNThr_; ++i) {
+        const int thr = thrList_[i];
+        if (h_S_tanL_thr_[i] && h_B_tanL_thr_[i]) {
+            h_SoverSqrtB_tanL_thr_[i] = (TH1F*)h_S_tanL_thr_[i]->Clone(Form("SoverSqrtB_tanL_ge%d",thr));
+            h_SoverSqrtB_tanL_thr_[i]->SetTitle(Form("S/#sqrt{B} vs tan#lambda (>= %d)",thr));
+            for (int b=1; b<=h_SoverSqrtB_tanL_thr_[i]->GetNbinsX(); ++b) {
+                const double s = h_S_tanL_thr_[i]->GetBinContent(b);
+                const double bg= h_B_tanL_thr_[i]->GetBinContent(b);
+                h_SoverSqrtB_tanL_thr_[i]->SetBinContent(b, (bg>0.0)? s/std::sqrt(bg) : 0.0);
+                h_SoverSqrtB_tanL_thr_[i]->SetBinError(b, 0.0);
+            }
+            h_SoverSqrtB_tanL_thr_[i]->Write();
+        }
+        if (h_S_p_thr_[i] && h_B_p_thr_[i]) {
+            h_SoverSqrtB_p_thr_[i] = (TH1F*)h_S_p_thr_[i]->Clone(Form("SoverSqrtB_p_ge%d",thr));
+            h_SoverSqrtB_p_thr_[i]->SetTitle(Form("S/#sqrt{B} vs p (>= %d)",thr));
+            for (int b=1; b<=h_SoverSqrtB_p_thr_[i]->GetNbinsX(); ++b) {
+                const double s = h_S_p_thr_[i]->GetBinContent(b);
+                const double bg= h_B_p_thr_[i]->GetBinContent(b);
+                h_SoverSqrtB_p_thr_[i]->SetBinContent(b, (bg>0.0)? s/std::sqrt(bg) : 0.0);
+                h_SoverSqrtB_p_thr_[i]->SetBinError(b, 0.0);
+            }
+            h_SoverSqrtB_p_thr_[i]->Write();
+        }
+    }
 
+    // Write everything
+    writeIf(recoilTree_);
     writeIf(h_rec_p_); writeIf(h_rec_theta_); writeIf(h_rec_vtz_);
     writeIf(h_rec_tanlam_p_); writeIf(h_rec_nhits_); writeIf(h_rec_tanlam_vs_nhits_);
-
     writeIf(h_rad_p_); writeIf(h_rad_theta_); writeIf(h_rad_vtz_); writeIf(h_rad_tanlam_p_);
 
     for (int i=0;i<kNThr_;++i) {
         writeIf(eff_den_tanL_[i]); writeIf(eff_num_tanL_[i]);
         writeIf(eff_den_p_[i]);    writeIf(eff_num_p_[i]);
+        writeIf(h_S_tanL_thr_[i]); writeIf(h_B_tanL_thr_[i]);
+        writeIf(h_S_p_thr_[i]);    writeIf(h_B_p_thr_[i]);
     }
 
     writeIf(h_S_tanL_);  writeIf(h_B_tanL_);
@@ -995,14 +771,6 @@ void RecoilProcessor::finalize() {
 
     writeIf(h_match_purity_); writeIf(h_match_holes_);
     writeIf(h_vz_vs_purity_); writeIf(h_tanL_vs_purity_);
-
-    writeIf(g_match_completeness);
-    writeIf(g_match_matchedLayers);
-    writeIf(g_comp_vs_purity);
-    writeIf(g_fakes_per_event);
-    writeIf(g_duplicates_per_event);
-    writeIf(g_missedLayers_per_event);
-    writeIf(g_mixedHits_per_event);
 
     writeIf(h_B_overlap_tanL_);
     writeIf(h_B_overlap_p_);
@@ -1015,14 +783,14 @@ void RecoilProcessor::finalize() {
         if (eff_den_tanL_[i] && eff_num_tanL_[i] && TEfficiency::CheckConsistency(*eff_num_tanL_[i], *eff_den_tanL_[i])) {
             auto* eTL = new TEfficiency(*eff_num_tanL_[i], *eff_den_tanL_[i]);
             eTL->SetName(Form("Eff_tanL_ge%d",thr));
-            eTL->SetTitle(Form("Tracking efficiency vs tan#lambda (>= %d layers)",thr));
+            eTL->SetTitle(Form("Efficiency vs tan#lambda (>= %d)",thr));
             eTL->SetStatisticOption(TEfficiency::kFCP);
             eTL->Write();
         }
         if (eff_den_p_[i] && eff_num_p_[i] && TEfficiency::CheckConsistency(*eff_num_p_[i], *eff_den_p_[i])) {
             auto* eP = new TEfficiency(*eff_num_p_[i], *eff_den_p_[i]);
             eP->SetName(Form("Eff_p_ge%d",thr));
-            eP->SetTitle(Form("Tracking efficiency vs p (>= %d layers)",thr));
+            eP->SetTitle(Form("Efficiency vs p (>= %d)",thr));
             eP->SetStatisticOption(TEfficiency::kFCP);
             eP->Write();
         }
