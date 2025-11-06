@@ -335,6 +335,8 @@ bool PreselectAndCategorize2021::process(IEvent*) {
         TVector3 pos_mom(pos.getTrack().getMomentum()[0], pos.getTrack().getMomentum()[1],
                          pos.getTrack().getMomentum()[2]);
 
+        TVector3 psum = ele_mom + pos_mom;
+
         vertex_cf_.begin_event();
         vertex_cf_.apply("positron_clusterE_above_0pt2GeV", pos.getCluster().getEnergy() >= 0.2);
         vertex_cf_.apply("ele_track_cluster", ele_track_cluster_tdiff <= time_cuts_[0]);
@@ -350,7 +352,7 @@ bool PreselectAndCategorize2021::process(IEvent*) {
         vertex_cf_.apply("pos_min_10_hits", pos_nhits >= 10);
         vertex_cf_.apply("vertex_chi2", vtx->getChi2() <= 20.0);
         double vtxmaxp = ele_mom.Mag() + pos_mom.Mag();
-        vertex_cf_.apply("vtx_max_p_4pt0GeV", vtxmaxp <= 4.0);
+        vertex_cf_.apply("vtx_max_p_4pt0GeV", psum.Mag() <= 4.0);
 
         vertex_cf_.fill_nm1("positron_clusterE_above_0pt2GeV", pos.getCluster().getEnergy());
         vertex_cf_.fill_nm1("ele_track_cluster", ele_track_cluster_tdiff);
@@ -436,7 +438,8 @@ bool PreselectAndCategorize2021::process(IEvent*) {
 
     TVector3 ele_mom(ele_trk.getMomentum()[0], ele_trk.getMomentum()[1], ele_trk.getMomentum()[2]);
     TVector3 pos_mom(pos_trk.getMomentum()[0], pos_trk.getMomentum()[1], pos_trk.getMomentum()[2]);
-    bus_.set("psum", ele_mom.Mag() + pos_mom.Mag());
+    TVector3 psum = ele_mom + pos_mom;
+    bus_.set("psum", psum.Mag());
 
     // calculate target projection and its significance
     if (not v0proj_fits_.empty()) {

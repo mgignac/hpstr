@@ -4,7 +4,7 @@
 #include <math.h>
 
 // #include <ROOT/RDF/RInterface.hxx>
-#include <ROOT/RDataFrame.hxx>
+//#include <ROOT/RDataFrame.hxx>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -165,9 +165,9 @@ class ZBiHistos : public HistoManager {
 
     TH1* getPDF(std::string histoname);
 
-    void addHistoFromDF(ROOT::RDF::RResultPtr<TH1D> df_histo);
+//    void addHistoFromDF(ROOT::RDF::RResultPtr<TH1D> df_histo);
 
-    void addHistoFromDF(ROOT::RDF::RResultPtr<TH2D> df_histo);
+//    void addHistoFromDF(ROOT::RDF::RResultPtr<TH2D> df_histo);
 
     json getConfig() { return _h_configs; };
 
@@ -184,8 +184,8 @@ class ZBiHistos : public HistoManager {
 
   private:
     std::map<std::string, TGraphErrors*> graphs_;  //!< hold graphs
-    std::vector<ROOT::RDF::RResultPtr<TH1D>> df_histos_;
-    std::vector<ROOT::RDF::RResultPtr<TH2D>> df_histos2d_;
+//    std::vector<ROOT::RDF::RResultPtr<TH1D>> df_histos_;
+//    std::vector<ROOT::RDF::RResultPtr<TH2D>> df_histos2d_;
 };
 
 #endif
