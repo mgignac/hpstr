@@ -170,10 +170,20 @@ private:
      TH2F* h_rad_tanlam_p_{nullptr};
 
 
+
+
+
+
+
+
+
+
+
+
     //more truth info
     // --- TruthTracks branch (LCIO Truth Track ID space)
     std::vector<Track*>* truthTrks_{nullptr};
-    TBranch*             bTruthTrks_{nullptr};
+    TBranch*             btruthTrks_{nullptr};
     
    std::string truthTracksCollRoot_{""};
    //track matching and efficiency functionality
@@ -205,7 +215,18 @@ private:
 	TH1F* h_SoverSqrtB_tanL_{nullptr};
 	TH1F* h_SoverSqrtB_p_{nullptr};
 
-	// Matching quality
+
+
+
+
+     // Per-threshold S/B shapes and derived S/sqrt(B) this takes into account denominator having different number of hits
+	std::array<TH1F*, kNThr_> h_S_tanL_thr_{};
+	std::array<TH1F*, kNThr_> h_B_tanL_thr_{};
+	std::array<TH1F*, kNThr_> h_S_p_thr_{};
+	std::array<TH1F*, kNThr_> h_B_p_thr_{};
+	std::array<TH1F*, kNThr_> h_SoverSqrtB_tanL_thr_{};
+	std::array<TH1F*, kNThr_> h_SoverSqrtB_p_thr_{};
+                                                                                                                          	// Matching quality
 	TH1F* h_match_purity_{nullptr};   // fraction of hits from matched recoil
 	TH1F* h_match_holes_{nullptr};    // # of truth layers missing on track
 	TH2F* h_vz_vs_purity_{nullptr};
@@ -215,6 +236,17 @@ private:
 	TH1F* h_B_overlap_p_{nullptr};
 	TH1F* h_B_zero_tanL_{nullptr};
 	TH1F* h_B_zero_p_{nullptr};
+
+
+
+      //acceptance histos
+          // Acceptance (findable / all generated) histograms per threshold
+    std::array<TH1F*, kNThr_> acc_den_tanL_{};  // DEN: all generated recoils (per-thr copy)
+    std::array<TH1F*, kNThr_> acc_num_tanL_{};  // NUM: findable recoils (>=thr)
+    std::array<TH1F*, kNThr_> acc_den_p_{};     // DEN: all generated recoils (per-thr copy)
+    std::array<TH1F*, kNThr_> acc_num_p_{};     // NUM: findable recoils (>=thr)
+
+
 
     //Debug level
     int debug_{0};
