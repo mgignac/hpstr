@@ -128,7 +128,7 @@ void PreselectAndCategorize2021::initialize(TTree* tree) {
         event_cf_.add("no_extra_true_ap", 3, 0.0, 2.0);
     }
     event_cf_.init();
-    std::vector<std::string> labels_event_cf = {"readout", "single2 or 3 trigger", "N_{vtx} >= 1", "N_{vtx} < 20"};
+    std::vector<std::string> labels_event_cf = {"readout", "single2 or 3 trigger", "N_{vtx} >= 1", "N_{vtx} < 2"};
     event_cf_.set_label_names(labels_event_cf);
 
     n_vertices_h_ = std::make_unique<TH2F>(
