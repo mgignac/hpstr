@@ -14,8 +14,8 @@ base.parser.add_argument("-b", "--ztail_nevents", type=float, dest="ztail_nevent
 base.parser.add_argument("-z", "--scan_zcut", type=int, dest="scan_zcut",
                          help="Choose best ZBi using Zcut Scan (1=yes, 0 = No)", metavar="scan_zcut", default=0)
 
-base.parser.add_argument("-m", "--step_size", type=float, dest="step_size",
-                         help="Cut % of signal with each iteration", metavar="step_size", default=0.01)
+# base.parser.add_argument("-m", "--step_size", type=float, dest="step_size",
+#                          help="Cut % of signal with each iteration", metavar="step_size", default=0.01)
 
 base.parser.add_argument("-e", "--eps", type=float, dest="eps",
                          help="strength of effective coupling epsilon", metavar="eps", default=-4)
@@ -69,17 +69,18 @@ p.libraries.append("libprocessors.dylib")  # use .so for linux
 zbi = HpstrConf.Processor('zbi', 'ApOptimizationProcessor')
 
 # Configure basic settings
-zbi.parameters['max_iteration'] = 20
+zbi.parameters['max_iteration'] = 10
 zbi.parameters['year'] = 2021
 zbi.parameters['debug'] = 0
 zbi.parameters['outFileName'] = options.outFilename
 # 1 will calculate ZBi as function of zcut position
 zbi.parameters['scan_zcut'] = options.scan_zcut
 # Specify %variable in signal to cut with each iteration
-zbi.parameters['step_size'] = options.step_size
+zbi.parameters['step_size'] = 0.05
 # 0.5 is the minimum allowed. ZBi calc breaks if 0.0
 zbi.parameters['min_ztail_events'] = 0.5
-zbi.parameters['start_ztail_events'] = 20.0
+zbi.parameters['start_ztail_events'] = 5.0
+zbi.parameters['fixed_zcut'] = -1.0  # in mm
 
 hpstr_analysis_base = os.environ['HPSTR_BASE'] + '/analysis/'
 hpstr_selection_base = hpstr_analysis_base + 'selections/'
@@ -92,26 +93,28 @@ print("Using histogram config file: ", zbi.parameters['variableHistCfgFilename']
 # Config SIMP model
 zbi.parameters['eq_cfgFile'] = hpstr_selection_base + 'simps/simp_parameters.json'
 # Choose initial set of cuts
-zbi.parameters['cuts_cfgFile'] = hpstr_selection_base + 'cutOptimization/iterativeCuts.json'
+zbi.parameters['cuts_cfgFile'] = hpstr_selection_base + \
+    'cutOptimization/iterativeCuts_{}.json'.format(int(options.mass))
 # Choose cut variables to tighten iteratively. Must be present in json file above^
 chooseIterativeCutVariables(zbi, ["min_y0"])
 
 # Configure Background
-zbi.parameters['bkgVtxAnaFilename'] = '/Users/schababi/Desktop/data/pass_v8beta/hps_014269_hadd_20files_ana.root'
+zbi.parameters['bkgVtxAnaFilename'] = '/Users/schababi/Desktop/data/pass_v8/hps_014269_ana_hadd_20files_pass4.root'
 zbi.parameters['bkgVtxAnaTreename'] = 'preselection'
 zbi.parameters['background_sf'] = 1.
 
 # Configure Signal
-zbi.parameters['signal_sf'] = 1e5
+zbi.parameters['signal_sf'] = 1000000.
+zbi.parameters['radFrac'] = 0.052
 zbi.parameters['signal_mass'] = options.mass * 1e-3  # in GeV
 zbi.parameters['mass_window_nsigma'] = 2.
-zbi.parameters['signalVtxSubsetAnaFilename'] = '/Users/schababi/Desktop/data/pass_v8beta/signal_subsets/ap_pulser_{}MeV_hadd10files.root'.format(
+zbi.parameters['signalVtxSubsetAnaFilename'] = '/Users/schababi/Desktop/data/pass_v8/MC_subsets/ap_{}_pulser_hadd_20files.root'.format(
     int(options.mass))
-zbi.parameters['signalVtxAnaFilename'] = '/Users/schababi/Desktop/data/pass_v8beta/ap_pulser_{}MeV_hadd_250files_ana.root'.format(
+zbi.parameters['signalVtxAnaFilename'] = '/Users/schababi/Desktop/data/pass_v8/ap_{}_pulser_hadd_200files.root'.format(
     int(options.mass))
 zbi.parameters['signalVtxAnaTreename'] = 'preselection'
 # pre-trigger signal MC analysis file
-zbi.parameters['signalMCAnaFilename'] = '/Users/schababi/Desktop/data/pass_v8beta/MC_truth/ap{}_3pt74_MC_truth_40_stdhep_files.root'.format(
+zbi.parameters['signalMCAnaFilename'] = '/Users/schababi/Desktop/data/pass_v8/MC_truth/ap_{}_3pt74_lhe_uniform_mom_rot_sum_1_100.root'.format(
     int(options.mass))
 zbi.parameters['signalMCAnaTreename'] = 'tree'
 zbi.parameters['signal_pdgid'] = '623'
@@ -120,7 +123,7 @@ zbi.parameters['eps'] = options.eps
 zbi.parameters['radFrac'] = radiativeFraction(options.mass)
 zbi.parameters['hit_category'] = 'l1l1'
 zbi.parameters['ztarget'] = -0.5  # in mm
-zbi.parameters['psum_cut'] = 3.0  # in GeV
+zbi.parameters['psum_cut'] = 2.9  # in GeV
 
 # Sequence which the processors will run.
 p.sequence = [zbi]

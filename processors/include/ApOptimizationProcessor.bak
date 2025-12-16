@@ -121,6 +121,7 @@ class ApOptimizationProcessor : public OptimizationProcessor {
     bool scan_zcut_ = false;                          //<! use zBi to optimize zcut
     double min_ztail_events_ = 1;                     //<! number of events (from fit) past zcut
     double start_ztail_events_ = 20.0;                //<! starting number of events (from fit) past zcut
+    double fixed_zcut_ = -1.0;                        //<! fixed zcut value in mm
     std::map<std::string, double> initialIntegrals_;  //<! description
 
     // Signal config
