@@ -79,8 +79,8 @@ zbi.parameters['scan_zcut'] = options.scan_zcut
 zbi.parameters['step_size'] = 0.05
 # 0.5 is the minimum allowed. ZBi calc breaks if 0.0
 zbi.parameters['min_ztail_events'] = 0.5
-zbi.parameters['start_ztail_events'] = 5.0
-zbi.parameters['fixed_zcut'] = -1.0  # in mm
+zbi.parameters['start_ztail_events'] = 4.0
+zbi.parameters['fixed_zcut'] = 0.0  # in mm
 
 hpstr_analysis_base = os.environ['HPSTR_BASE'] + '/analysis/'
 hpstr_selection_base = hpstr_analysis_base + 'selections/'
@@ -104,7 +104,7 @@ zbi.parameters['bkgVtxAnaTreename'] = 'preselection'
 zbi.parameters['background_sf'] = 1.
 
 # Configure Signal
-zbi.parameters['signal_sf'] = 1000000.
+zbi.parameters['signal_sf'] = 100.
 zbi.parameters['radFrac'] = 0.052
 zbi.parameters['signal_mass'] = options.mass * 1e-3  # in GeV
 zbi.parameters['mass_window_nsigma'] = 2.

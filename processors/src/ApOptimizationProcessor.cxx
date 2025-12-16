@@ -244,24 +244,24 @@ bool ApOptimizationProcessor::process() {
     std::vector<std::string> bkgVars = getListOfVariables(bkgHistos_->getConfig(), true);
     // df_bkg_mod_.Snapshot("trees/background", outFileName_, bkgVars, opts_);
 
-    // define fraction of radiative selected signal to simulated signal
-    RDF::RInterface<Detail::RDF::RJittedFilter, void> df_signal_ =
-        applyFilter(df_signal_mod_, "psum > " + std::to_string(psum_cut_), "radCut");
+    // save radiative selected data mass spectrum
     RDF::RInterface<Detail::RDF::RJittedFilter, void> df_bkg_ =
         applyFilter(df_bkg_mod_, "psum > " + std::to_string(psum_cut_), "radCut");
 
     RDF::RResultPtr<TH1D> h_data_mass_rad_selected =
-        df_bkg_.Histo1D({"h_data_mass_rad_selected", ";mass [GeV];Events/0.5GeV", 100, 0, 0.4}, "vertex.invM_");
+        df_bkg_.Histo1D({"h_data_mass_rad_selected", ";mass [GeV];Events/0.004GeV", 100, 0, 0.4}, "vertex.invM_");
 
     h_data_mass_rad_selected->Sumw2();
     TH1D* h_data_mass_rad_ = (TH1D*)h_data_mass_rad_selected->Clone("h_data_mass_rad_");
+    h_data_mass_rad_->Scale(signal_sf_);  // scale to expected data size
     testCutHistos_->addHisto1d(h_data_mass_rad_);
 
-    df_signal_ = applyFilter(df_signal_, massWindow_, "massWindow");
-    df_bkg_ = applyFilter(df_bkg_, massWindow_, "massWindow");
+    // define fraction of radiative selected signal to simulated signal
+    RDF::RInterface<Detail::RDF::RJittedFilter, void> df_signal_ =
+        applyFilter(df_signal_mod_, "psum > " + std::to_string(psum_cut_), "radCut");
 
-    df_signal_ = applyFilter(df_signal_, getHitCategoryCut(), getHitCategoryCut());
-    df_bkg_ = applyFilter(df_bkg_, getHitCategoryCut(), getHitCategoryCut());
+    df_signal_ = applyFilter(df_signal_, massWindow_ + " && " + getHitCategoryCut(), "massWindow_" + hit_category_);
+    df_bkg_ = applyFilter(df_bkg_, massWindow_ + " && " + getHitCategoryCut(), "massWindow_" + hit_category_);
 
     // Step_size defines n% of signal distribution to cut in a given variable
     double cutFraction = step_size_;
@@ -304,7 +304,8 @@ bool ApOptimizationProcessor::process() {
         df_signal_cut[cutname].push_back(df_signal_);
         df_bkg_cut[cutname].push_back(df_bkg_);
 
-        // Apply persistent cuts and save cut values (all cuts except the one being tested)
+        // Apply persistent cuts (all cuts except the one being tested)
+        std::string filter = "";
         for (range_cut_iter_ it = persistentCutsPtr_->begin(); it != persistentCutsPtr_->end(); it++) {
             std::string persistent_cut = it->first;
             if (persistent_cut != cutname) {
@@ -312,32 +313,31 @@ bool ApOptimizationProcessor::process() {
                 if (persistent_cut == "pos_z0" || persistent_cut == "ele_z0" || persistent_cut == "min_y0") {
                     double zoffset = persistentCutsSelector_->getCutRange(persistent_cut).first;  // mm
                     double alpha = persistentCutsSelector_->getCutRange(persistent_cut).second;   // rad
-                    std::string filter = "vertex_z * " + std::to_string(alpha) + " - abs(" + cutvar_persistent +
-                                         ") < " + std::to_string(alpha) + " * " + std::to_string(zoffset);
+                    filter += "(vertex_z * " + std::to_string(alpha) + " - abs(" + cutvar_persistent + ") < " +
+                              std::to_string(alpha) + " * " + std::to_string(zoffset) + ")";
 
-                    df_signal_cut[cutname].back() =
-                        applyFilter(df_signal_cut[cutname].back(), filter, persistent_cut + "_persistent");
-                    df_bkg_cut[cutname].back() =
-                        applyFilter(df_bkg_cut[cutname].back(), filter, persistent_cut + "_persistent");
                 } else {
-                    std::string filter = "";
                     if (persistentCutsSelector_->getCutRange(persistent_cut).first < -999.) {
-                        filter = cutvar_persistent + " < " +
-                                 std::to_string(persistentCutsSelector_->getCutRange(persistent_cut).second);
+                        filter += "(" + cutvar_persistent + " < " +
+                                  std::to_string(persistentCutsSelector_->getCutRange(persistent_cut).second) + ")";
+                        if (persistentCutsSelector_->getCutRange(persistent_cut).second > 999.) {
+                            filter += " && ";
+                        }
 
                     } else if (persistentCutsSelector_->getCutRange(persistent_cut).second > 999.) {
-                        filter = cutvar_persistent + " > " +
-                                 std::to_string(persistentCutsSelector_->getCutRange(persistent_cut).first);
+                        filter += "(" + cutvar_persistent + " > " +
+                                  std::to_string(persistentCutsSelector_->getCutRange(persistent_cut).first) + ")";
                     }
-
-                    // applying persistent cuts on top of radiative, massWindow and hit category cuts
-                    df_signal_cut[cutname].back() =
-                        applyFilter(df_signal_cut[cutname].back(), filter, persistent_cut + "_persistent");
-                    df_bkg_cut[cutname].back() =
-                        applyFilter(df_bkg_cut[cutname].back(), filter, persistent_cut + "_persistent");
+                }
+                if (persistent_cut != (--persistentCutsPtr_->end())->first) {
+                    filter += " && ";
                 }
             }
         }
+
+        // apply in one go to minimize nesting of filters
+        df_signal_cut[cutname].back() = applyFilter(df_signal_cut[cutname].back(), filter, "persistent_cuts");
+        df_bkg_cut[cutname].back() = applyFilter(df_bkg_cut[cutname].back(), filter, "persistent_cuts");
 
         std::cout << "Applying persistent cuts complete. Getting quantiles for Test Cut variable " << cutname
                   << std::endl;
@@ -467,15 +467,7 @@ bool ApOptimizationProcessor::process() {
                 {("h_zvtx_background_" + cutname + "_" + std::to_string(iteration)).c_str(),
                  ";z_{vtx}/mm;N_{events}/a.u.", 200, -50.0, 150.0},
                 "vertex_z"));
-
             bkg_hists.at(cutname).at(iteration)->Sumw2();
-            std::string fitname = cutname + "_" + std::to_string(iteration);
-            std::vector<double> fit_params_vec = fitZBkgTail(bkg_hists.at(cutname).at(iteration), fitname, true);
-            if (fit_params_vec.size() < 4) {
-                std::cout << "Error: fit to background z vtx tail failed for cut " << cutname << " at iteration "
-                          << iteration << std::endl;
-                continue;
-            }
 
             double best_z_cut = 0.0;
             double ZBi_for_best_zcut = -99;
@@ -484,6 +476,14 @@ bool ApOptimizationProcessor::process() {
             double Nevents_for_best_zcut = 0;
 
             if (fixed_zcut_ < 0) {
+                std::string fitname = cutname + "_" + std::to_string(iteration);
+                std::vector<double> fit_params_vec = fitZBkgTail(bkg_hists.at(cutname).at(iteration), fitname, true);
+                if (fit_params_vec.size() < 4) {
+                    std::cout << "Error: fit to background z vtx tail failed for cut " << cutname << " at iteration "
+                              << iteration << std::endl;
+                    continue;
+                }
+
                 for (double ztail_events = start_ztail_events_; ztail_events >= min_ztail_events_;
                      ztail_events -= 0.5) {
                     double z_cut =
@@ -518,16 +518,9 @@ bool ApOptimizationProcessor::process() {
                         (TH1D*)zsig->Clone(("h_chi_eff_" + cutname + "_" + std::to_string(iteration)).c_str());
                     h_chi_eff->Divide(h_signal_vtxz_rad_);
 
-                    double Nsig = computeDisplacedYield(h_data_mass_rad_, h_chi_eff, 0.8 * 3.74, 0.5);
+                    double Nsig = computeDisplacedYield(h_data_mass_rad_, h_chi_eff, 0.8 * 3.74, 0.004);
 
-                    double Nbkg = 0.0;
-                    if (zbkg->Integral() > 10) {
-                        zbkg->Fit("expo", "QRS", "", z_cut, zbkg->GetXaxis()->GetXmax());
-                        TF1* fit = zbkg->GetFunction("expo");
-                        Nbkg = fit->Integral(z_cut, zbkg->GetXaxis()->GetXmax());
-                    } else {
-                        Nbkg = zbkg->Integral();
-                    }
+                    double Nbkg = zbkg->Integral(zbkg->FindBin(z_cut), zbkg->GetXaxis()->GetXmax());
 
                     if (debug_) {
                         std::cout << "Test Cut " << cutname << " at iteration " << iteration << " (cutting "
@@ -536,7 +529,7 @@ bool ApOptimizationProcessor::process() {
                     }
 
                     // scale Nsig
-                    Nsig = Nsig * signal_sf_;
+                    // Nsig = Nsig * signal_sf_;
 
                     // Round Nsig, Nbkg
                     // Nsig = round(Nsig);
@@ -546,9 +539,9 @@ bool ApOptimizationProcessor::process() {
                     // double n_on = Nsig + Nbkg;
                     // double tau = 1.0;  // TODO: look up what tau is
                     // double n_off = Nbkg;
-                    // double ZBi = calculateZBi(n_on, n_off, tau);
+                    double ZBi = calculateZBi((Nsig + Nbkg), Nbkg, 1.0);
 
-                    double ZBi = Nsig / sqrt(Nsig + Nbkg);  // simple significance
+                    // double ZBi = Nsig / sqrt(Nsig + Nbkg);  // simple significance
 
                     if (ZBi > ZBi_for_best_zcut) {
                         ZBi_for_best_zcut = ZBi;
@@ -559,46 +552,62 @@ bool ApOptimizationProcessor::process() {
                     }
                 }
             } else {
-                double z_cut = fixed_zcut_;
-                auto all_cuts_sig = applyFilter(df_signal_cut[cutname].at(iteration + 1),
-                                                "vertex_z > " + std::to_string(z_cut), cutname + "_zcut");
-                auto all_cuts_bkg = applyFilter(df_bkg_cut[cutname].at(iteration + 1),
-                                                "vertex_z > " + std::to_string(z_cut), cutname + "_zcut");
+                double start_z = fixed_zcut_;
 
-                auto zsig = all_cuts_sig.Histo1D(
-                    {("h_zvtx_signal_" + cutname + "_all_cuts_" + std::to_string(iteration)).c_str(),
-                     ";z_{vtx}/mm;N_{events}/a.u.", 200, -50.0, 150.0},
-                    "vertex_z");
-                auto zbkg = all_cuts_bkg.Histo1D(
-                    {("h_zvtx_background_" + cutname + "_all_cuts_" + std::to_string(iteration)).c_str(),
-                     ";z_{vtx}/mm;N_{events}/a.u.", 200, -50.0, 150.0},
-                    "vertex_z");
+                auto zbkg_no_zcut =
+                    df_bkg_cut[cutname]
+                        .at(iteration + 1)
+                        .Histo1D({("h_zvtx_background_" + cutname + "_all_cuts_" + std::to_string(iteration)).c_str(),
+                                  ";z_{vtx}/mm;N_{events}/a.u.", 200, -50.0, 150.0},
+                                 "vertex_z");
 
-                zsig->Sumw2();
-                TH1D* h_chi_eff =
-                    (TH1D*)zsig->Clone(("h_chi_eff_" + cutname + "_" + std::to_string(iteration)).c_str());
-                h_chi_eff->Divide(h_signal_vtxz_rad_);
+                int lastbin = zbkg_no_zcut->FindLastBinAbove(0.5);
+                double last_z = zbkg_no_zcut->GetBinCenter(lastbin);
 
-                double Nsig = computeDisplacedYield(h_data_mass_rad_, h_chi_eff, 0.8 * 3.74, 0.5);
-
-                double Nbkg = 0.0;
-                if (zbkg->Integral() > 10) {
-                    zbkg->Fit("expo", "QRS", "", z_cut, zbkg->GetXaxis()->GetXmax());
-                    TF1* fit = zbkg->GetFunction("expo");
-                    Nbkg = fit->Integral(z_cut, zbkg->GetXaxis()->GetXmax());
-                } else {
-                    Nbkg = zbkg->Integral();
+                // make array of z cut values between start_z and last_z in steps of 0.5 mm
+                std::vector<double> z_cuts;
+                for (double z = start_z; z <= last_z; z += 0.5) {
+                    z_cuts.push_back(z);
                 }
 
-                // scale Nsig
-                Nsig = Nsig * signal_sf_;
-                double ZBi = Nsig / sqrt(Nsig + Nbkg);  // simple significance
+                for (auto z_cut : z_cuts) {
+                    auto all_cuts_sig = applyFilter(df_signal_cut[cutname].at(iteration + 1),
+                                                    "vertex_z > " + std::to_string(z_cut), cutname + "_zcut");
+                    auto all_cuts_bkg = applyFilter(df_bkg_cut[cutname].at(iteration + 1),
+                                                    "vertex_z > " + std::to_string(z_cut), cutname + "_zcut");
 
-                ZBi_for_best_zcut = ZBi;
-                best_z_cut = z_cut;
-                Nsig_for_best_zcut = Nsig;
-                Nbkg_for_best_zcut = Nbkg;
-                Nevents_for_best_zcut = Nbkg;
+                    auto zsig = all_cuts_sig.Histo1D(
+                        {("h_zvtx_signal_" + cutname + "_all_cuts_" + std::to_string(iteration)).c_str(),
+                         ";z_{vtx}/mm;N_{events}/a.u.", 200, -50.0, 150.0},
+                        "vertex_z");
+                    auto zbkg = all_cuts_bkg.Histo1D(
+                        {("h_zvtx_background_" + cutname + "_all_cuts_" + std::to_string(iteration)).c_str(),
+                         ";z_{vtx}/mm;N_{events}/a.u.", 200, -50.0, 150.0},
+                        "vertex_z");
+
+                    zsig->Sumw2();
+                    TH1D* h_chi_eff =
+                        (TH1D*)zsig->Clone(("h_chi_eff_" + cutname + "_" + std::to_string(iteration)).c_str());
+                    h_chi_eff->Divide(h_signal_vtxz_rad_);
+
+                    double Nsig = computeDisplacedYield(h_data_mass_rad_, h_chi_eff, 0.8 * 3.74, 0.004);
+
+                    double Nbkg = zbkg->Integral(zbkg->FindBin(z_cut), zbkg->GetXaxis()->GetXmax());
+
+                    // scale Nsig
+                    // Nsig = Nsig * signal_sf_;
+                    // double ZBi = Nsig / sqrt(Nsig + Nbkg);  // simple significance
+                    double ZBi = calculateZBi((Nsig + Nbkg), Nbkg, 1.0);
+
+                    if (ZBi > ZBi_for_best_zcut) {
+                        ZBi_for_best_zcut = ZBi;
+                        best_z_cut = z_cut;
+                        Nsig_for_best_zcut = Nsig;
+                        Nbkg_for_best_zcut = Nbkg;
+                        double ztail_events = zbkg->Integral(zbkg->FindBin(z_cut), zbkg->GetXaxis()->GetXmax());
+                        Nevents_for_best_zcut = ztail_events;
+                    }
+                }
             }
 
             if (ZBi_for_best_zcut > best_ZBi) {

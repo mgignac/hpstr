@@ -1263,14 +1263,14 @@ void ZBiHistos::writeHistosFromDF(TFile* outF, std::string folder) {
         dir = outF->mkdir(folder.c_str(), "", true);
         dir->cd();
     }
-//    std::cout << df_histos_.size() << std::endl;
-//    for (int i = 0; i < df_histos_.size(); i++) {
-//        df_histos_[i]->Write();
-//    }
+    //    std::cout << df_histos_.size() << std::endl;
+    //    for (int i = 0; i < df_histos_.size(); i++) {
+    //        df_histos_[i]->Write();
+    //    }
 
-//    for (int i = 0; i < df_histos2d_.size(); i++) {
-//        df_histos2d_[i]->Write();
-//    }
+    //    for (int i = 0; i < df_histos2d_.size(); i++) {
+    //        df_histos2d_[i]->Write();
+    //    }
 }
 
 TH1* ZBiHistos::getPDF(std::string histoname) {
@@ -1285,7 +1285,7 @@ TH1* ZBiHistos::getPDF(std::string histoname) {
     return hist;
 }
 
-//void ZBiHistos::addHistoFromDF(ROOT::RDF::RResultPtr<TH1D> df_histo) { df_histos_.push_back(df_histo); }
+void ZBiHistos::addHistoFromDF(ROOT::RDF::RResultPtr<TH1D> df_histo) { df_histos_.push_back(df_histo); }
 
 TGraphErrors* ZBiHistos::configureGraph(std::string name, std::string xlabel, std::string ylabel) {
     TGraphErrors* graph = new TGraphErrors();
@@ -1308,4 +1308,4 @@ TGraphErrors* ZBiHistos::configureGraph(std::string name, std::string xlabel, st
     return graph;
 }
 
-//void ZBiHistos::addHistoFromDF(ROOT::RDF::RResultPtr<TH2D> df_histo) { df_histos2d_.push_back(df_histo); }
+void ZBiHistos::addHistoFromDF(ROOT::RDF::RResultPtr<TH2D> df_histo) { df_histos2d_.push_back(df_histo); }
