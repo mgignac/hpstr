@@ -56,3 +56,4 @@ install/
 .gitignore
 .vscode/
 .DS_Store
+build*/
