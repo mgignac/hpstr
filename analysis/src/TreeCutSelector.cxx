@@ -43,7 +43,7 @@ bool TreeCutSelector::LoadSelection() {
         }
     }
 
-    makeCutFlowHisto();
+    // makeCutFlowHisto();
     return true;
 }
 
@@ -69,22 +69,58 @@ std::string TreeCutSelector::getCutVar(std::string cutname, bool forTree) {
     return var;
 }
 
-std::string TreeCutSelector::getCutString(std::string cutname) {
+std::string TreeCutSelector::getCutString(std::string cutname, bool forTree) {
     std::string cutstring = "";
     if (!hasCut(cutname)) {
         std::cout << "ERROR " << cutname << " cut not implemented" << std::endl;
         return cutstring;
     }
     std::string var = getCutVar(cutname);
-    if (range_cuts[cutname].first.first > -999.) {
-        cutstring = var + " >= " + std::to_string(range_cuts[cutname].first.first);
-    }
-    if (range_cuts[cutname].first.second < 999.) {
-        if (!cutstring.empty()) cutstring += " && ";
-        cutstring += var + " <= " + std::to_string(range_cuts[cutname].first.second);
+
+    if (cutname == "pos_z0" || cutname == "ele_z0" || cutname == "min_y0") {
+        double zoffset = range_cuts[cutname].first.first;  // mm
+        double alpha = range_cuts[cutname].first.second;   // rad
+        std::string zvertex = "vertex_z";
+        if (forTree) zvertex = "vertex.getZ()";
+        cutstring += "(" + zvertex + " * " + std::to_string(alpha) + " - abs(" + var + ") < " + std::to_string(alpha) +
+                     " * " + std::to_string(zoffset) + ")";
+    } else {
+        if (range_cuts[cutname].first.first > -999.) {
+            cutstring += var + " >= " + std::to_string(range_cuts[cutname].first.first);
+        }
+        if (range_cuts[cutname].first.second < 999.) {
+            if (!cutstring.empty()) cutstring += " && ";
+            cutstring += var + " <= " + std::to_string(range_cuts[cutname].first.second);
+        }
     }
 
     return cutstring;
+}
+
+std::string TreeCutSelector::getFullCutString(std::vector<std::string> cuts_to_exclude, bool forTree) {
+    std::string full_cutstring = "";
+    for (std::map<std::string, std::pair<std::pair<double, double>, int>>::iterator it = getPointerToCuts()->begin();
+         it != getPointerToCuts()->end(); ++it) {
+        std::string cutname = it->first;
+        bool exclude = false;
+        for (std::vector<std::string>::iterator eit = cuts_to_exclude.begin(); eit != cuts_to_exclude.end(); eit++) {
+            if (*eit == cutname) {
+                exclude = true;
+                break;
+            }
+        }
+        if (exclude) continue;
+
+        std::string cutstring = getCutString(cutname, forTree);
+        if (!cutstring.empty()) {
+            if (!full_cutstring.empty()) full_cutstring += " && ";
+            full_cutstring += cutstring;
+        }
+    }
+    if (full_cutstring.empty()) full_cutstring = "1";  // no cuts, always true
+
+    full_cutstring = "(" + full_cutstring + ")";
+    return full_cutstring;
 }
 
 void TreeCutSelector::filterCuts(std::vector<std::string> cut_variable_list) {

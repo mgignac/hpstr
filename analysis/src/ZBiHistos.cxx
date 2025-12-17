@@ -1252,26 +1252,26 @@ void ZBiHistos::writeHistos(TFile* outF, std::string folder) {
     }
 }
 
-void ZBiHistos::writeHistosFromDF(TFile* outF, std::string folder) {
-    if (outF)
-        outF->cd();
-    else
-        return;
+// void ZBiHistos::writeHistosFromDF(TFile* outF, std::string folder) {
+//     if (outF)
+//         outF->cd();
+//     else
+//         return;
 
-    TDirectory* dir{nullptr};
-    if (!folder.empty()) {
-        dir = outF->mkdir(folder.c_str(), "", true);
-        dir->cd();
-    }
-    //    std::cout << df_histos_.size() << std::endl;
-    //    for (int i = 0; i < df_histos_.size(); i++) {
-    //        df_histos_[i]->Write();
-    //    }
+//     TDirectory* dir{nullptr};
+//     if (!folder.empty()) {
+//         dir = outF->mkdir(folder.c_str(), "", true);
+//         dir->cd();
+//     }
+//        std::cout << df_histos_.size() << std::endl;
+//        for (int i = 0; i < df_histos_.size(); i++) {
+//            df_histos_[i]->Write();
+//        }
 
-    //    for (int i = 0; i < df_histos2d_.size(); i++) {
-    //        df_histos2d_[i]->Write();
-    //    }
-}
+//        for (int i = 0; i < df_histos2d_.size(); i++) {
+//            df_histos2d_[i]->Write();
+//        }
+// }
 
 TH1* ZBiHistos::getPDF(std::string histoname) {
     if (histos1d.find(m_name + "_" + histoname) == histos1d.end()) {
@@ -1285,7 +1285,7 @@ TH1* ZBiHistos::getPDF(std::string histoname) {
     return hist;
 }
 
-void ZBiHistos::addHistoFromDF(ROOT::RDF::RResultPtr<TH1D> df_histo) { df_histos_.push_back(df_histo); }
+// void ZBiHistos::addHistoFromDF(ROOT::RDF::RResultPtr<TH1D> df_histo) { df_histos_.push_back(df_histo); }
 
 TGraphErrors* ZBiHistos::configureGraph(std::string name, std::string xlabel, std::string ylabel) {
     TGraphErrors* graph = new TGraphErrors();
@@ -1308,4 +1308,4 @@ TGraphErrors* ZBiHistos::configureGraph(std::string name, std::string xlabel, st
     return graph;
 }
 
-void ZBiHistos::addHistoFromDF(ROOT::RDF::RResultPtr<TH2D> df_histo) { df_histos2d_.push_back(df_histo); }
+// void ZBiHistos::addHistoFromDF(ROOT::RDF::RResultPtr<TH2D> df_histo) { df_histos2d_.push_back(df_histo); }

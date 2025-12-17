@@ -96,7 +96,8 @@ zbi.parameters['eq_cfgFile'] = hpstr_selection_base + 'simps/simp_parameters.jso
 zbi.parameters['cuts_cfgFile'] = hpstr_selection_base + \
     'cutOptimization/iterativeCuts_{}.json'.format(int(options.mass))
 # Choose cut variables to tighten iteratively. Must be present in json file above^
-chooseIterativeCutVariables(zbi, ["min_y0"])
+chooseIterativeCutVariables(zbi, ["vtx_proj_sig"])
+# chooseIterativeCutVariables(zbi, ["min_y0"])
 
 # Configure Background
 zbi.parameters['bkgVtxAnaFilename'] = '/Users/schababi/Desktop/data/pass_v8/hps_014269_ana_hadd_20files_pass4.root'

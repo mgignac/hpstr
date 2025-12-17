@@ -16,7 +16,8 @@ class TreeCutSelector : public BaseSelector {
     virtual ~TreeCutSelector();
 
     bool LoadSelection();
-    std::string getCutString(std::string cutname);
+    std::string getCutString(std::string cutname, bool forTree = false);
+    std::string getFullCutString(std::vector<std::string> cuts_to_exclude = {}, bool forTree = false);
     std::string getCutVar(std::string cutname, bool forTree = false);
 
     /**
