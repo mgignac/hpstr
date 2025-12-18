@@ -11,10 +11,6 @@
 #include "ZBiHistos.h"
 
 // ROOT
-#include <ROOT/RDataFrame.hxx>
-#include <ROOT/RSnapshotOptions.hxx>
-#include <ROOT/TDataFrame.hxx>
-
 #include "TBranch.h"
 #include "TEfficiency.h"
 #include "TF1.h"
@@ -80,9 +76,9 @@ class ApOptimizationProcessor : public OptimizationProcessor {
     void determineSignalVertexEfficiencyXi(TTree* signal_subset_tree);
     double computeTruthSignalShape(double z, double EAp);
     double computePromptYield();
-    double computeDisplacedYield(TH1D* h_chi_eff, double EAp);
+    double computeDisplacedYield(TH1* h_chi_eff, double EAp);
 
-    std::vector<double> fitZBkgTail(TH1D* h_bkg_vtxz, std::string fitname, bool doGausAndTail = false);
+    std::vector<double> fitZBkgTail(TH1* h_bkg_vtxz, std::string fitname);
 
     double* getBinsAndLimits(json histo_cfg, std::string varname);
 
@@ -93,11 +89,10 @@ class ApOptimizationProcessor : public OptimizationProcessor {
     void initializeTestCutPDF(std::string cut_name, std::string cut_var, std::string persistent_cuts);
     void initializeGraphs(std::string cut_name);
 
-    RDF::RNode prepareDF(RDataFrame df);
-    RDF::RNode applyInitialCuts(RDF::RNode df);
-
     std::vector<std::pair<double, double>> getZoffsetAlpha(TH2F* h_y0_vs_z, int n_quantiles, int nbins);
     double* getQuantileArray(std::pair<double, double> range, int n_quantiles, double initial_cut_frac = -999.9);
+
+    std::vector<double> findZcut(TH1* h_bkg_vtxz_cut, bool fromTailFit, int iteration = 0);
 
   private:
     //  Configuration parameters
@@ -106,7 +101,6 @@ class ApOptimizationProcessor : public OptimizationProcessor {
     std::string variableHistCfgFilename_{""};  //<! histogram config file
     bool scan_zcut_ = false;                   //<! use zBi to optimize zcut
     double min_ztail_events_ = 1;              //<! number of events (from fit) past zcut
-    double start_ztail_events_ = 20.0;         //<! starting number of events (from fit) past zcut
     double fixed_zcut_ = -1.0;                 //<! fixed zcut value in mm
 
     // Signal config
@@ -135,9 +129,10 @@ class ApOptimizationProcessor : public OptimizationProcessor {
     std::map<std::string, std::pair<std::pair<double, double>, int>>* persistentCutsPtr_{nullptr};
     std::map<std::string, std::pair<std::pair<double, double>, int>>* testCutsPtr_{nullptr};
 
-    std::map<std::string, TH1F*> testVarPDFs_;         //<! PDFs for test variables
-    std::map<std::string, TH1F*> testVarCDFs_;         //<! CDFs for test variables
-    std::map<std::string, double*> testVarQuantiles_;  //<! quantiles for test variables
+    std::map<std::string, TH1F*> testVarPDFs_;           //<! PDFs for test variables
+    std::map<std::string, TH1F*> testVarCDFs_;           //<! CDFs for test variables
+    std::map<std::string, double*> testVarQuantiles_;    //<! quantiles for test variables
+    std::map<std::string, double*> testVarQuantilePos_;  //<! quantile positions for test variables
     std::map<std::string, std::vector<std::pair<double, double>>>
         testZoffsetAlpha_;  //<! zoffset and alpha for z0 cut, key is cutname, sorted by quantile
 
@@ -153,14 +148,12 @@ class ApOptimizationProcessor : public OptimizationProcessor {
     std::string massWindow_{""};
     std::string initialCuts_{""};
 
-    RDF::RSnapshotOptions opts_ = RDF::RSnapshotOptions();
-
-    double zbins_[3]{200., -50., 150.};
+    double zbins_[3]{400., -50., 150.};
+    std::string zbin_str_ =
+        "(" + std::to_string((int)zbins_[0]) + "," + std::to_string(zbins_[1]) + "," + std::to_string(zbins_[2]) + ")";
+    double z_bin_width_ = (zbins_[2] - zbins_[1]) / zbins_[0];
     double massbins_[3]{200., 0., 0.4};
-    double mass_bin_width_;
-
-    // RDF::RNode df_signal_;
-    // RDF::RNode df_bkg_;
+    double mass_bin_width_ = (massbins_[2] - massbins_[1]) / massbins_[0];
 };
 
 #endif

@@ -69,7 +69,7 @@ p.libraries.append("libprocessors.dylib")  # use .so for linux
 zbi = HpstrConf.Processor('zbi', 'ApOptimizationProcessor')
 
 # Configure basic settings
-zbi.parameters['max_iteration'] = 10
+zbi.parameters['max_iteration'] = 20
 zbi.parameters['year'] = 2021
 zbi.parameters['debug'] = 0
 zbi.parameters['outFileName'] = options.outFilename
@@ -79,8 +79,7 @@ zbi.parameters['scan_zcut'] = options.scan_zcut
 zbi.parameters['step_size'] = 0.05
 # 0.5 is the minimum allowed. ZBi calc breaks if 0.0
 zbi.parameters['min_ztail_events'] = 0.5
-zbi.parameters['start_ztail_events'] = 4.0
-zbi.parameters['fixed_zcut'] = 0.0  # in mm
+zbi.parameters['fixed_zcut'] = -99.9  # in mm
 
 hpstr_analysis_base = os.environ['HPSTR_BASE'] + '/analysis/'
 hpstr_selection_base = hpstr_analysis_base + 'selections/'
@@ -96,8 +95,9 @@ zbi.parameters['eq_cfgFile'] = hpstr_selection_base + 'simps/simp_parameters.jso
 zbi.parameters['cuts_cfgFile'] = hpstr_selection_base + \
     'cutOptimization/iterativeCuts_{}.json'.format(int(options.mass))
 # Choose cut variables to tighten iteratively. Must be present in json file above^
-chooseIterativeCutVariables(zbi, ["vtx_proj_sig"])
-# chooseIterativeCutVariables(zbi, ["min_y0"])
+# chooseIterativeCutVariables(zbi, ["vtx_proj_sig"])
+chooseIterativeCutVariables(zbi, ["min_y0"])
+# chooseIterativeCutVariables(zbi, ["ele_L1_iso_significance", "pos_L1_iso_significance"])
 
 # Configure Background
 zbi.parameters['bkgVtxAnaFilename'] = '/Users/schababi/Desktop/data/pass_v8/hps_014269_ana_hadd_20files_pass4.root'

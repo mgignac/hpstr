@@ -6,14 +6,12 @@
 #include <string>
 
 ApOptimizationProcessor::ApOptimizationProcessor(const std::string& name, Process& process)
-    : OptimizationProcessor(name, process) {
-    std::cout << "[ApOptimizationProcessor] Constructor()" << std::endl;
-}
+    : OptimizationProcessor(name, process) {}
 
 ApOptimizationProcessor::~ApOptimizationProcessor() {}
 
 void ApOptimizationProcessor::configure(const ParameterSet& parameters) {
-    std::cout << "[ApOptimizationProcessor] configure()" << std::endl;
+    std::cout << "ApOptimizationProcessor::configure" << std::endl;
     try {
         // Basic config
         debug_ = parameters.getInteger("debug", debug_);
@@ -45,8 +43,8 @@ void ApOptimizationProcessor::configure(const ParameterSet& parameters) {
         max_iteration_ = parameters.getInteger("max_iteration", max_iteration_);
         step_size_ = parameters.getDouble("step_size", step_size_);
         min_ztail_events_ = parameters.getDouble("min_ztail_events", min_ztail_events_);
-        start_ztail_events_ = parameters.getDouble("start_ztail_events", start_ztail_events_);
         scan_zcut_ = parameters.getInteger("scan_zcut", scan_zcut_);
+        fixed_zcut_ = parameters.getDouble("fixed_zcut", fixed_zcut_);
 
         // Expected Signal Calculation
         radFrac_ = parameters.getDouble("radFrac", radFrac_);
@@ -59,9 +57,8 @@ void ApOptimizationProcessor::configure(const ParameterSet& parameters) {
 }
 
 void ApOptimizationProcessor::initialize(std::string inFilename, std::string outFilename) {
-    std::cout << "[ApOptimizationProcessor] Initialize " << inFilename << std::endl;
+    std::cout << "ApOptimizationProcessor::initialize with output file " << outFilename << std::endl;
 
-    opts_.fMode = "UPDATE";
     outFileName_ = outFilename;
 
     // TODO: write equation to find mass resolution at signal mass
@@ -74,33 +71,33 @@ void ApOptimizationProcessor::initialize(std::string inFilename, std::string out
         "(vertex.invM_ > " + std::to_string(lowMass_) + " && vertex.invM_ < " + std::to_string(highMass_) + ")";
 
     // Read signal ana vertex tuple, and convert to mutable tuple
-    std::cout << "[ApOptimizationProcessor]::Reading Signal AnaVertex Tuple from file " << signalVtxAnaFilename_.c_str()
-              << std::endl;
+    std::cout << "ApOptimizationProcessor::initialize: Reading Signal AnaVertex Tuple from file "
+              << signalVtxAnaFilename_.c_str() << std::endl;
     signalVtxAnaFile_ = new TFile(signalVtxAnaFilename_.c_str(), "READ");
     signal_tree_ = (TTree*)signalVtxAnaFile_->Get(signalVtxAnaTreename_.c_str());
 
     TFile* signalVtxSubsetAnaFile = new TFile(signalVtxSubsetAnaFilename_.c_str(), "READ");
     TTree* signal_subset_tree = (TTree*)signalVtxSubsetAnaFile->Get(signalVtxAnaTreename_.c_str());
 
-    std::cout << "[ApOptimizationProcessor]::Reading Signal MC Tuple from file " << signalMCAnaFilename_.c_str()
-              << std::endl;
+    std::cout << "ApOptimizationProcessor::initialize: Reading Signal MC Tuple from file "
+              << signalMCAnaFilename_.c_str() << std::endl;
     signalMCAnaFile_ = new TFile(signalMCAnaFilename_.c_str(), "READ");
     signal_pretrig_sim_tree_ = (TTree*)signalMCAnaFile_->Get(signalMCAnaTreename_.c_str());
 
     // Read background ana vertex tuple, and convert to mutable tuple
-    std::cout << "[ApOptimizationProcessor]::Reading Background AnaVertex Tuple from file "
+    std::cout << "ApOptimizationProcessor::initialize: Reading Background AnaVertex Tuple from file "
               << bkgVtxAnaFilename_.c_str() << std::endl;
     bkgVtxAnaFile_ = new TFile(bkgVtxAnaFilename_.c_str(), "READ");
     bkg_tree_ = (TTree*)bkgVtxAnaFile_->Get(bkgVtxAnaTreename_.c_str());
 
     // Initialize Persistent Cut Selector. These cuts are applied to all events.
-    std::cout << "[ApOptimizationProcessor]::Initializing Set of Persistent Cuts" << std::endl;
+    std::cout << "ApOptimizationProcessor::initialize: Initializing Set of Persistent Cuts" << std::endl;
     persistentCutsSelector_ = new TreeCutSelector("persistentCuts", cuts_cfgFile_);
     persistentCutsSelector_->LoadSelection();
     persistentCutsPtr_ = persistentCutsSelector_->getPointerToCuts();
 
     // initalize Test Cuts
-    std::cout << "[ApOptimizationProcessor]::Initializing Set of Test Cuts" << std::endl;
+    std::cout << "ApOptimizationProcessor::initialize: Initializing Set of Test Cuts" << std::endl;
     testCutsSelector_ = new TreeCutSelector("testCuts", cuts_cfgFile_);
     testCutsSelector_->LoadSelection();
     testCutsPtr_ = testCutsSelector_->getPointerToCuts();
@@ -125,32 +122,38 @@ void ApOptimizationProcessor::initialize(std::string inFilename, std::string out
 
     initialCuts_ = "(psum > " + std::to_string(psum_cut_) + ") && " + massWindow_;
 
+    std::cout << "ApOptimizationProcessor::initialize: Setting up Test Cut PDFs and Quantiles" << std::endl;
     json cut_cfg = signalHistos_->getConfig();
     // Add Test Cut Analysis Histograms necessary for calculating background and signal
     for (cut_iter_ it = testCutsPtr_->begin(); it != testCutsPtr_->end(); it++) {
         std::string cut_name = it->first;
         std::string cut_var = testCutsSelector_->getCutVar(cut_name, true);
 
-        // Define persistent cut string for this test cut
         persistentCutStrings_[cut_name] = initialCuts_ + " && " + getHitCategoryCut() + " && " +
-                                          persistentCutsSelector_->getFullCutString({cut_name}, false);
-
-        std::string persistent_cuts_for_tree = initialCuts_ + " && " + getHitCategoryCut() + " && ";
-        persistent_cuts_for_tree += persistentCutsSelector_->getFullCutString({cut_name}, true);
+                                          persistentCutsSelector_->getFullCutString({cut_name}, true);
 
         // Initialize graphs to store iterative results for each Test Cut variable
         initializeGraphs(cut_name);
 
         // Determine pdf and cdf for test cut variable (not meaningful for z0 and y0 variables)
-        initializeTestCutPDF(cut_name, cut_var, persistent_cuts_for_tree.c_str());
+        initializeTestCutPDF(cut_name, cut_var, persistentCutStrings_[cut_name].c_str());
 
         // Get cutvalue that corresponds to cutting n% of signal distribution in cutvar
         if (cut_name == "pos_z0" || cut_name == "ele_z0" || cut_name == "min_y0") {
+            std::cout << "ApOptimizationProcessor::initialize: Setting up z0/y0 cut quantiles for cut " << cut_name
+                      << std::endl;
+
             signal_tree_->Draw(
                 (cut_var + ":vertex.getZ() >> h_pdf2d_signal_cut_" + cut_name + "(120, -5, 25, 200, 0, 2)").c_str(),
-                persistent_cuts_for_tree.c_str());
+                persistentCutStrings_[cut_name].c_str());
             TH2F* pdf_signal_cut = (TH2F*)gDirectory->Get(("h_pdf2d_signal_cut_" + cut_name).c_str());
+
             testZoffsetAlpha_[cut_name] = getZoffsetAlpha(pdf_signal_cut, max_iteration_, 10);
+
+            testVarQuantiles_[cut_name] = new double[max_iteration_];
+            for (int i = 0; i < max_iteration_; i++) {
+                testVarQuantiles_[cut_name][i] = i * step_size_;
+            }
         } else {
             // find initial cut fraction to vary quantile calculation around
             double initial_cut_value;
@@ -168,13 +171,8 @@ void ApOptimizationProcessor::initialize(std::string inFilename, std::string out
                 getQuantileArray(testCutsSelector_->getCutRange(cut_name), max_iteration_, initial_cut_frac);
 
             testVarPDFs_[cut_name]->GetQuantiles(max_iteration_, quantile_pos, quantiles);
-            testVarQuantiles_[cut_name] = quantile_pos;
-
-            std::cout << "Quantiles for Test Cut variable " << cut_name << ": ";
-            for (int i = 0; i < max_iteration_; i++) {
-                std::cout << testVarQuantiles_[cut_name][i] << " ";
-            }
-            std::cout << std::endl;
+            testVarQuantiles_[cut_name] = quantiles;
+            testVarQuantilePos_[cut_name] = quantile_pos;
         }
     }
 
@@ -184,53 +182,39 @@ void ApOptimizationProcessor::initialize(std::string inFilename, std::string out
     // Save data mass distribution after initial cuts for signal estimation
     std::string mass_bin_str = "(" + std::to_string((int)massbins_[0]) + "," + std::to_string(massbins_[1]) + "," +
                                std::to_string(massbins_[2]) + ")";
-    mass_bin_width_ = (massbins_[2] - massbins_[1]) / massbins_[0];
     bkg_tree_->Draw(("vertex.invM_ >> h_data_mass" + mass_bin_str).c_str(), initialCuts_.c_str());
     h_data_mass_rad_ = (TH1D*)gDirectory->Get("h_data_mass");
     h_data_mass_rad_->SetTitle((";m_{inv} [GeV];Events/" + std::to_string(mass_bin_width_) + "GeV").c_str());
 
     // apply initial cuts to background and keep for record
-    std::string zbin_str =
-        "(" + std::to_string((int)zbins_[0]) + "," + std::to_string(zbins_[1]) + "," + std::to_string(zbins_[2]) + ")";
-    double binning = (zbins_[2] - zbins_[1]) / zbins_[0];
-    bkg_tree_->Draw(("vertex.getZ() >> h_data_vtxz_rad" + zbin_str).c_str(), initialCuts_.c_str());
+    bkg_tree_->Draw(("vertex.getZ() >> h_data_vtxz_rad" + zbin_str_).c_str(), initialCuts_.c_str());
     auto h_data_vtxz_rad_ = (TH1D*)gDirectory->Get("h_data_vtxz_rad");
-    h_data_vtxz_rad_->SetTitle((";z_{vtx} [mm];Events/" + std::to_string(binning) + "mm").c_str());
+    h_data_vtxz_rad_->SetTitle((";z_{vtx} [mm];Events/" + std::to_string(z_bin_width_) + "mm").c_str());
 
     bkgHistos_->addHisto1d(h_data_vtxz_rad_);
 }
 
 bool ApOptimizationProcessor::process() {
-    std::cout << "[ApOptimizationProcessor]::process()" << std::endl;
+    std::cout << "ApOptimizationProcessor::process: Start of processing events" << std::endl;
 
-    // prepare dataframes: applying psum cut and mass window cut
-    auto df_signal_init = prepareDF(RDataFrame(*signal_tree_));
-    auto df_bkg_init = prepareDF(RDataFrame(*bkg_tree_));
-
-    std::map<std::string, std::vector<RDF::RNode>> df_signal_cut;
-    std::map<std::string, std::vector<RDF::RNode>> df_bkg_cut;
+    auto t1 = std::chrono::high_resolution_clock::now();
 
     for (cut_iter_ it = testCutsPtr_->begin(); it != testCutsPtr_->end(); it++) {
         std::string cutname = it->first;
         std::string cutvar = testCutsSelector_->getCutVar(cutname, true);
 
-        // store dataframes after applying persistent cuts only
-        df_signal_cut[cutname].push_back(
-            df_signal_init.Filter(persistentCutStrings_[cutname], "persistentCuts_" + cutname));
-        df_bkg_cut[cutname].push_back(df_bkg_init.Filter(persistentCutStrings_[cutname], "persistentCuts_" + cutname));
-
         // iteratively cut n% of the signal distribution for a given Test Cut variable
         for (int iteration = 0; iteration < max_iteration_; iteration++) {
             double cutvalue;
+            double cutfraction = testVarQuantiles_[cutname][iteration];
             std::string filter = "";
-            double cutSignal = (double)iteration * step_size_;
             if (cutname == "pos_z0" || cutname == "ele_z0" || cutname == "min_y0") {
                 double zoffset = testZoffsetAlpha_[cutname][iteration].first;  // mm
                 double alpha = testZoffsetAlpha_[cutname][iteration].second;   // rad
                 filter = "vertex.getZ() * " + std::to_string(alpha) + " - abs(" + cutvar + ") < " +
                          std::to_string(alpha) + " * " + std::to_string(zoffset);
             } else {
-                cutvalue = testVarQuantiles_[cutname][iteration];
+                cutvalue = testVarQuantilePos_[cutname][iteration];
                 if (testCutsSelector_->getCutRange(cutname).first < -999.) {
                     filter = cutvar + " < " + std::to_string(cutvalue);
                 } else if (testCutsSelector_->getCutRange(cutname).second > 999.) {
@@ -238,81 +222,117 @@ bool ApOptimizationProcessor::process() {
                 }
             }
 
-            std::cout << "Applying Test Cut " << filter << " at iteration " << iteration << std::endl;
+            if (debug_) std::cout << "Applying Test Cut " << filter << " at iteration " << iteration << std::endl;
+
+            std::string tight_cuts = persistentCutStrings_[cutname] + " && " + filter;
+
+            bkg_tree_->Draw(
+                ("vertex.getZ() >> h_bkg_vtxz_cut_" + cutname + "_" + std::to_string(iteration) + zbin_str_).c_str(),
+                tight_cuts.c_str());
+            auto h_bkg_vtxz_cut =
+                (TH1D*)gDirectory->Get(("h_bkg_vtxz_cut_" + cutname + "_" + std::to_string(iteration)).c_str());
+            h_bkg_vtxz_cut->SetTitle(
+                (";z_{vtx} [mm];Background Events/" + std::to_string(z_bin_width_) + "mm").c_str());
+            h_bkg_vtxz_cut->Sumw2();
+            bkgHistos_->addHisto1d(h_bkg_vtxz_cut);
+
+            std::vector<double> zcuts;
+            if (fixed_zcut_ > -99.0) {
+                // use fixed zcut from config
+                zcuts.push_back(fixed_zcut_);
+            } else {
+                // find zcuts corresponding to different expected background levels
+                zcuts = findZcut(h_bkg_vtxz_cut, true, iteration);
+            }
+
+            double Nsig_for_best_zcut = 0.0;
+            double Nbkg_for_best_zcut = 0.0;
+            double best_z_cut = 0.0;
+            double ZBi_for_best_zcut = -99.0;
+
+            for (double zcut : zcuts) {
+                if (debug_) std::cout << "Using zcut = " << zcut << " mm" << std::endl;
+
+                // Apply zcut to signal and background and store vertex z histograms after cut
+                std::string zcut_filter = tight_cuts + " && (vertex.getZ() > " + std::to_string(zcut) + ")";
+
+                signal_tree_->Draw(
+                    ("vertex.getZ() >> h_signal_vtxz_cut_" + cutname + "_" + std::to_string(iteration) + zbin_str_)
+                        .c_str(),
+                    zcut_filter.c_str());
+                auto h_signal_vtxz_cut =
+                    (TH1D*)gDirectory->Get(("h_signal_vtxz_cut_" + cutname + "_" + std::to_string(iteration)).c_str());
+                h_signal_vtxz_cut->SetTitle(
+                    (";z_{vtx} [mm];Signal Events/" + std::to_string(z_bin_width_) + "mm").c_str());
+                h_signal_vtxz_cut->Sumw2();
+                signalHistos_->addHisto1d(h_signal_vtxz_cut);
+
+                TH1F* h_chi =
+                    (TH1F*)h_signal_vtxz_cut->Clone(("h_chi_" + cutname + "_" + std::to_string(iteration)).c_str());
+                h_chi->Divide(h_signal_vtxz_rad_);
+                processorHistos_->addHisto1d(h_chi);
+
+                double Nbkg = h_bkg_vtxz_cut->Integral(h_bkg_vtxz_cut->FindBin(zcut), h_bkg_vtxz_cut->GetNbinsX());
+                double Nsig = computeDisplacedYield(h_chi, 0.9 * 3.74);
+                double zbi = calculateZBi((Nsig + Nbkg), Nbkg, 1.0);
+
+                if (debug_)
+                    std::cout << "Expected Signal: " << Nsig << ", Expected Background: " << Nbkg << ", ZBi: " << zbi
+                              << std::endl;
+
+                if (zbi > ZBi_for_best_zcut) {
+                    ZBi_for_best_zcut = zbi;
+                    best_z_cut = zcut;
+                    Nsig_for_best_zcut = Nsig;
+                    Nbkg_for_best_zcut = Nbkg;
+                }
+            }
+
+            if (cutname == "pos_z0" || cutname == "ele_z0" || cutname == "min_y0") {
+                double zoffset = testZoffsetAlpha_[cutname][iteration].first;  // mm
+                double alpha = testZoffsetAlpha_[cutname][iteration].second;   // rad
+
+                processorHistos_->getGraph("g_nsig_vs_" + cutname)->AddPoint(iteration, Nsig_for_best_zcut);
+                processorHistos_->getGraph("g_nbkg_vs_" + cutname)->AddPoint(iteration, Nbkg_for_best_zcut);
+                processorHistos_->getGraph("g_zcut_vs_" + cutname)->AddPoint(iteration, best_z_cut);
+                processorHistos_->getGraph("g_zbi_vs_" + cutname)->AddPoint(iteration, ZBi_for_best_zcut);
+                processorHistos_->getGraph("g_cut_frac_vs_" + cutname)->AddPoint(iteration, cutfraction);
+                processorHistos_->getGraph("g_zoffset_vs_" + cutname)->AddPoint(iteration, zoffset);
+                processorHistos_->getGraph("g_alpha_vs_" + cutname)->AddPoint(iteration, alpha);
+            } else {
+                processorHistos_->getGraph("g_nsig_vs_" + cutname)->AddPoint(cutvalue, Nsig_for_best_zcut);
+                processorHistos_->getGraph("g_nbkg_vs_" + cutname)->AddPoint(cutvalue, Nbkg_for_best_zcut);
+                processorHistos_->getGraph("g_zcut_vs_" + cutname)->AddPoint(cutvalue, best_z_cut);
+                processorHistos_->getGraph("g_zbi_vs_" + cutname)->AddPoint(cutvalue, ZBi_for_best_zcut);
+                processorHistos_->getGraph("g_cut_frac_vs_" + cutname)->AddPoint(cutvalue, cutfraction);
+            }
         }
     }
-    // auto df_signal = df_signal_init.Filter()
 
-    outFile_ = TFile::Open(outFileName_.c_str(), "RECREATE");
-    outFile_->cd();
-    TDirectory* dir{nullptr};
-    std::string folder = "output_hists";
-    if (!folder.empty()) {
-        dir = outFile_->mkdir(folder.c_str(), "", true);
-        dir->cd();
-    }
-    // for (range_cut_iter_ it = testCutsPtr_->begin(); it != testCutsPtr_->end(); it++) {
-    //     std::string cutname = it->first;
-    //     for (int i = 0; i < sig_hists.at(cutname).size(); i++) {
-    //         sig_hists.at(cutname)[i]->Write();
-    //     }
-    //     for (int i = 0; i < bkg_hists.at(cutname).size(); i++) {
-    //         bkg_hists.at(cutname)[i]->Write();
-    //     }
-    // }
-    outFile_->Close();
+    auto t2 = std::chrono::high_resolution_clock::now();
+
+    /* Getting number of milliseconds as an integer. */
+    auto time_in_sec = std::chrono::duration_cast<std::chrono::seconds>(t2 - t1);
+
+    std::cout << "ApOptimizationProcessor::process: End of processing events. Time taken: " << time_in_sec.count()
+              << " s" << std::endl;
     return true;
 }
 
 void ApOptimizationProcessor::finalize() {
-    std::cout << "[ApOptimizationProcessor] finalize()" << std::endl;
-
-    if (debug_) {
-        std::cout << "FINAL LIST OF PERSISTENT CUTS " << std::endl;
-        persistentCutsSelector_->printCuts();
-    }
+    std::cout << "ApOptimizationProcessor::finalize" << std::endl;
 
     // Initialize output file
-    std::cout << "[ApOptimizationProcessor]::Output File: " << outFileName_.c_str() << std::endl;
-    outFile_ = new TFile(outFileName_.c_str(), "UPDATE");
+    outFile_ = new TFile(outFileName_.c_str(), "RECREATE");
 
     processorHistos_->saveHistos(outFile_, "processorHistos");
     processorHistos_->writeGraphs(outFile_, "processorGraphs");
-    // processorHistos_->writeHistosFromDF(outFile_, "processorHistos");
     testCutHistos_->saveHistos(outFile_, "testCutHistos");
     signalHistos_->saveHistos(outFile_, "signal");
     bkgHistos_->saveHistos(outFile_, "background");
 
     outFile_->Close();
 }
-
-// void ApOptimizationProcessor::configureGraphs(TGraph* zcutscan_zbi_g, TGraph* zcutscan_nsig_g, TGraph*
-// zcutscan_nbkg_g,
-//                                               TGraph* nbkg_zbi_g, TGraph* nsig_zbi_g, std::string cutname) {
-//     zcutscan_zbi_g->SetName(("zcut_vs_zbi_" + cutname + "_g").c_str());
-//     zcutscan_zbi_g->SetTitle(("zcut_vs_zbi_" + cutname + "_g;zcut [mm];zbi").c_str());
-//     zcutscan_zbi_g->SetMarkerStyle(8);
-//     zcutscan_zbi_g->SetMarkerSize(2.0);
-//     zcutscan_zbi_g->SetMarkerColor(2);
-
-//     zcutscan_nsig_g->SetName(("zcut_vs_nsig_" + cutname + "_g").c_str());
-//     zcutscan_nsig_g->SetTitle(("zcut_vs_nsig_" + cutname + "_g;zcut [mm];nsig").c_str());
-//     zcutscan_nsig_g->SetMarkerStyle(23);
-//     zcutscan_nsig_g->SetMarkerSize(2.0);
-//     zcutscan_nsig_g->SetMarkerColor(57);
-
-//     zcutscan_nbkg_g->SetName(("zcut_vs_nbkg_" + cutname + "_g").c_str());
-//     zcutscan_nbkg_g->SetTitle(("zcut_vs_nbkg_" + cutname + "_g;zcut [mm];nbkg").c_str());
-//     zcutscan_nbkg_g->SetMarkerStyle(45);
-//     zcutscan_nbkg_g->SetMarkerSize(2.0);
-//     zcutscan_nbkg_g->SetMarkerColor(49);
-
-//     nbkg_zbi_g->SetName(("nbkg_vs_zbi_" + cutname + "_g").c_str());
-//     nbkg_zbi_g->SetTitle(("nbkg_vs_zbi_" + cutname + "_g;nbkg;zbi").c_str());
-
-//     nsig_zbi_g->SetName(("nsig_vs_zbi_" + cutname + "_g").c_str());
-//     nsig_zbi_g->SetTitle(("nsig_vs_zbi_" + cutname + "_g;nsig;zbi").c_str());
-// }
 
 double ApOptimizationProcessor::computeTruthSignalShape(double z, double EAp) {
     // EAp in GeV, mass in GeV
@@ -330,7 +350,7 @@ double ApOptimizationProcessor::computePromptYield() {
     return radFrac_ * factors * Nbin * signal_mass_ / mass_bin_width_;
 }
 
-double ApOptimizationProcessor::computeDisplacedYield(TH1D* h_chi_eff, double EAp) {
+double ApOptimizationProcessor::computeDisplacedYield(TH1* h_chi_eff, double EAp) {
     double expected_signal = 0.0;
     for (int i = 1; i <= h_chi_eff->GetNbinsX(); i++) {
         double z = h_chi_eff->GetBinCenter(i);
@@ -338,15 +358,59 @@ double ApOptimizationProcessor::computeDisplacedYield(TH1D* h_chi_eff, double EA
         double eff = h_chi_eff->GetBinContent(i) * f_xi_eff_->Eval(z);
         expected_signal += eff * Ntruth;
     }
-    // std::cout << "Integral: " << expected_signal << std::endl;
     expected_signal *= computePromptYield();
-    // std::cout << "Expected Displaced Signal Yield: " << expected_signal << std::endl;
+
+    if (debug_) std::cout << "Expected Displaced Signal Yield: " << expected_signal << std::endl;
     return expected_signal;
 }
 
-std::vector<double> ApOptimizationProcessor::fitZBkgTail(TH1D* h_bkg, std::string fitname, bool doGausAndTail) {
+std::vector<double> ApOptimizationProcessor::fitZBkgTail(TH1* h_bkg, std::string fitname) {
     std::vector<double> fit_params;
+    TF1* bkg_tail_fit = new TF1(fitname.c_str(), "[0]*exp([2]*(x-[1]))", 0.0, 10.0);
+    bkg_tail_fit->SetParameters(1000.0, 30.0, -0.1);
+    h_bkg->Fit(bkg_tail_fit, "RQ");
+    fit_params.push_back(bkg_tail_fit->GetParameter(0));  // A
+    fit_params.push_back(bkg_tail_fit->GetParameter(1));  // z0
+    fit_params.push_back(bkg_tail_fit->GetParameter(2));  // slope
     return fit_params;
+}
+
+std::vector<double> ApOptimizationProcessor::findZcut(TH1* h_bkg_vtxz_cut, bool fromTailFit, int iteration) {
+    std::vector<double> zcuts;
+    double A = 0.0;
+    double z0 = 0.0;
+    double slope = 0.0;
+
+    if (fromTailFit) {
+        // fit z tail to find zcut corresponding to ztail_events
+        std::vector<double> fit_params = fitZBkgTail((TH1*)h_bkg_vtxz_cut, "bkg_tail_fit" + std::to_string(iteration));
+        A = fit_params[0];
+        z0 = fit_params[1];
+        slope = fit_params[2];
+    }
+
+    for (double ztail_events = min_ztail_events_; ztail_events <= 20; ztail_events += 0.5) {
+        if (fromTailFit) {
+            // fit z tail to find zcut corresponding to ztail_events
+            double zcut = z0 - (log(ztail_events) - log(A)) / slope;
+            zcuts.push_back(zcut);
+        } else {
+            double cumulative_bkg = 0.0;
+            for (int bin = h_bkg_vtxz_cut->GetNbinsX(); bin >= min_ztail_events_; bin--) {
+                cumulative_bkg += h_bkg_vtxz_cut->GetBinContent(bin);
+                if (cumulative_bkg >= 1.0) {
+                    double zcut = h_bkg_vtxz_cut->GetBinLowEdge(bin);
+                    zcuts.push_back(zcut);
+                    break;
+                }
+            }
+        }
+        if (!scan_zcut_) {
+            break;  // only need one zcut if not scanning
+        }
+    }
+
+    return zcuts;
 }
 
 // Get mass resolution in GeV
@@ -371,44 +435,6 @@ std::string ApOptimizationProcessor::getHitCategoryCut() {
     } else {
         return "(1)";  // no cut
     }
-}
-
-RDF::RNode ApOptimizationProcessor::prepareDF(RDataFrame df) {
-    std::cout << "[ApOptimizationProcessor]::prepareDF Applying initial cuts and defining new columns" << std::endl;
-
-    auto df_new =
-        (applyInitialCuts(df))
-            .Define("vertex_z", [](const Vertex& vtx) { return vtx.getZ(); }, {"vertex."})
-            .Define("ele_p", [](const Particle& ele) { return ele.getP(); }, {"ele."})
-            .Define("pos_p", [](const Particle& pos) { return pos.getP(); }, {"pos."})
-            .Define("ele_z0", [](const Particle& ele) { return ele.getTrack().getZ0(); }, {"ele."})
-            .Define("pos_z0", [](const Particle& pos) { return pos.getTrack().getZ0(); }, {"pos."})
-            .Define("abs_ele_z0", [](const Particle& ele) { return std::abs(ele.getTrack().getZ0()); }, {"ele."})
-            .Define("abs_pos_z0", [](const Particle& pos) { return std::abs(pos.getTrack().getZ0()); }, {"pos."})
-            .Define("ele_z0err", [](const Particle& ele) { return ele.getTrack().getZ0Err(); }, {"ele."})
-            .Define("pos_z0err", [](const Particle& pos) { return pos.getTrack().getZ0Err(); }, {"pos."})
-            .Define("ele_track_time", [](const Particle& ele) { return ele.getTrack().getTrackTime(); }, {"ele."})
-            .Define("pos_track_time", [](const Particle& pos) { return pos.getTrack().getTrackTime(); }, {"pos."})
-            .Define("vertex_cxx", [](const Vertex& vtx) { return vtx.getCovariance().at(0); }, {"vertex."})
-            .Define("vertex_cyy", [](const Vertex& vtx) { return vtx.getCovariance().at(2); }, {"vertex."})
-            .Define("vertex_czz", [](const Vertex& vtx) { return vtx.getCovariance().at(5); }, {"vertex."})
-            .Define("ele_d0", [](const Particle& ele) { return ele.getTrack().getD0(); }, {"ele."})
-            .Define("pos_d0", [](const Particle& pos) { return pos.getTrack().getD0(); }, {"pos."})
-            .Define("ele_tanLambda", [](const Particle& ele) { return ele.getTrack().getTanLambda(); }, {"ele."})
-            .Define("pos_tanLambda", [](const Particle& pos) { return pos.getTrack().getTanLambda(); }, {"pos."})
-            .Define("ele_phi0", [](const Particle& ele) { return ele.getTrack().getPhi(); }, {"ele."})
-            .Define("pos_phi0", [](const Particle& pos) { return pos.getTrack().getPhi(); }, {"pos."})
-            .Define("abs_min_y0", [](const double min_y0) { return std::abs(min_y0); }, {"min_y0"})
-            .Define("ele_nhits", [](const Particle& ele) { return ele.getTrack().getSvtHits().GetEntries(); }, {"ele."})
-            .Define("pos_nhits", [](const Particle& pos) { return pos.getTrack().getSvtHits().GetEntries(); },
-                    {"pos."});
-
-    return df_new;
-}
-
-RDF::RNode ApOptimizationProcessor::applyInitialCuts(RDF::RNode df) {
-    auto df_after_cuts = df.Filter("(psum > " + std::to_string(psum_cut_) + ") && " + massWindow_, "initialCuts");
-    return df_after_cuts;
 }
 
 double* ApOptimizationProcessor::getBinsAndLimits(json histo_cfg, std::string varname) {
@@ -478,19 +504,16 @@ void ApOptimizationProcessor::initializeGraphs(std::string cut_name) {
 }
 
 void ApOptimizationProcessor::determineSignalVertexEfficiencyXi(TTree* signal_subset_tree) {
-    std::string zbin_str =
-        "(" + std::to_string((int)zbins_[0]) + "," + std::to_string(zbins_[1]) + "," + std::to_string(zbins_[2]) + ")";
-    double binning = (zbins_[2] - zbins_[1]) / zbins_[0];
     // vertex z distribution from generated A' sample
-    signal_pretrig_sim_tree_->Draw(("vtx.z >> h_pretrig_signal_vtxz" + zbin_str).c_str());
+    signal_pretrig_sim_tree_->Draw(("vtx.z >> h_pretrig_signal_vtxz" + zbin_str_).c_str());
     h_pretrig_signal_vtxz_ = (TH1D*)gDirectory->Get("h_pretrig_signal_vtxz");
     h_pretrig_signal_vtxz_->Sumw2();
 
     // vertex z distribution from reconstructed A' (corresponding to generated sample)
     // apply psum and mass window cuts == initial cuts
-    signal_subset_tree->Draw(("true_ap.vtx_z_ >> h_signal_vtxz_rad_subset" + zbin_str).c_str(), initialCuts_.c_str());
+    signal_subset_tree->Draw(("true_ap.vtx_z_ >> h_signal_vtxz_rad_subset" + zbin_str_).c_str(), initialCuts_.c_str());
     h_signal_vtxz_rad_subset_ = (TH1D*)gDirectory->Get("h_signal_vtxz_rad_subset");
-    h_signal_vtxz_rad_subset_->SetTitle((";z_{truth} [mm];Events/" + std::to_string(binning) + "mm").c_str());
+    h_signal_vtxz_rad_subset_->SetTitle((";z_{truth} [mm];Events/" + std::to_string(z_bin_width_) + "mm").c_str());
     h_signal_vtxz_rad_subset_->Sumw2();
 
     TH1D* h_xi_eff = (TH1D*)h_signal_vtxz_rad_subset_->Clone("h_xi_eff");
@@ -508,9 +531,9 @@ void ApOptimizationProcessor::determineSignalVertexEfficiencyXi(TTree* signal_su
     signalHistos_->addHisto1d(h_xi_eff);
 
     // determine h_signal_vtxz_rad_ for full signal sample
-    signal_tree_->Draw(("vertex.getZ() >> h_signal_vtxz_rad" + zbin_str).c_str(), initialCuts_.c_str());
+    signal_tree_->Draw(("vertex.getZ() >> h_signal_vtxz_rad" + zbin_str_).c_str(), initialCuts_.c_str());
     h_signal_vtxz_rad_ = (TH1D*)gDirectory->Get("h_signal_vtxz_rad");
-    h_signal_vtxz_rad_->SetTitle((";z_{vtx} [mm];Events/" + std::to_string(binning) + "mm").c_str());
+    h_signal_vtxz_rad_->SetTitle((";z_{vtx} [mm];Events/" + std::to_string(z_bin_width_) + "mm").c_str());
     h_signal_vtxz_rad_->Sumw2();
 
     signalHistos_->addHisto1d(h_signal_vtxz_rad_);
@@ -520,11 +543,15 @@ double* ApOptimizationProcessor::getQuantileArray(std::pair<double, double> rang
                                                   double initial_cut_frac) {
     double* quantiles = new double[n_quantiles];
     double start_frac = 1.0;
-    std::cout << "initial cut fraction: " << initial_cut_frac << std::endl;
+
+    if (debug_)
+        std::cout << "ApOptimizationProcessor::getQuantileArray: Initial cut fraction = " << initial_cut_frac
+                  << std::endl;
     if (initial_cut_frac > -999.) {
         // recenter quantiles around initial cut fraction
         start_frac = initial_cut_frac - (n_quantiles / 2) * step_size_;
-        std::cout << "start frac: " << start_frac << std::endl;
+        if (debug_)
+            std::cout << "ApOptimizationProcessor::getQuantileArray: Start at fraction = " << start_frac << std::endl;
         for (int i = 0; i < n_quantiles; i++) {
             if (start_frac + step_size_ * i < 0.)
                 quantiles[i] = 0.;
@@ -562,10 +589,11 @@ std::vector<std::pair<double, double>> ApOptimizationProcessor::getZoffsetAlpha(
             processorHistos_->configureGraph(("g_y0_vs_z_q" + std::to_string(q)).c_str(), "z_{vtx} [mm]", "y_{0} [mm]");
         processorHistos_->addGraph(g_y0_vs_z);
     }
-    std::cout << int(h_y0_vs_z->GetNbinsX() / nbins) << std::endl;
+    if (debug_)
+        std::cout << "ApOptimizationProcessor::getZoffsetAlpha: Number of z bins = "
+                  << int(h_y0_vs_z->GetNbinsX() / nbins) << std::endl;
 
     for (int i = 1; i <= int(h_y0_vs_z->GetNbinsX() / nbins); i++) {
-        std::cout << nbins * i << ", " << nbins * (i + 1) << std::endl;
         auto h_proj = h_y0_vs_z->ProjectionY(("h_y0_vs_z_py_" + std::to_string(i)).c_str(), nbins * i, nbins * (i + 1));
         processorHistos_->addHisto1d(h_proj);
 
@@ -592,7 +620,9 @@ std::vector<std::pair<double, double>> ApOptimizationProcessor::getZoffsetAlpha(
 
         double zoffset = -f1->GetParameter(0) / f1->GetParameter(1);
         zoffset_alpha.push_back(std::make_pair(zoffset, f1->GetParameter(1)));
-        std::cout << "Quantile " << q << " : zoffset = " << zoffset << " alpha = " << f1->GetParameter(1) << std::endl;
+        if (debug_)
+            std::cout << "Quantile " << q << " : zoffset = " << zoffset << " alpha = " << f1->GetParameter(1)
+                      << std::endl;
     }
     return zoffset_alpha;
 }
