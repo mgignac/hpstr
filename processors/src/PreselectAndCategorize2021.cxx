@@ -327,9 +327,6 @@ bool PreselectAndCategorize2021::process(IEvent*) {
         int pos_nhits = pos.getTrack().getTrackerHitCount();
         if (not pos.getTrack().isKalmanTrack()) pos_nhits *= 2;
 
-        double ele_track_cluster_tdiff{abs(ele.getTrack().getTrackTime() - pos.getCluster().getTime())};
-        double pos_track_cluster_tdiff{abs(pos.getTrack().getTrackTime() - pos.getCluster().getTime())};
-
         TVector3 ele_mom(ele.getTrack().getMomentum()[0], ele.getTrack().getMomentum()[1],
                          ele.getTrack().getMomentum()[2]);
         TVector3 pos_mom(pos.getTrack().getMomentum()[0], pos.getTrack().getMomentum()[1],
@@ -339,10 +336,10 @@ bool PreselectAndCategorize2021::process(IEvent*) {
 
         vertex_cf_.begin_event();
         vertex_cf_.apply("positron_clusterE_above_0pt2GeV", pos.getCluster().getEnergy() >= 0.2);
-        vertex_cf_.apply("ele_track_cluster", ele_track_cluster_tdiff <= time_cuts_[0]);
-        vertex_cf_.apply("pos_track_cluster", pos_track_cluster_tdiff <= time_cuts_[1]);
+        vertex_cf_.apply("ele_track_cluster", fabs(ele.getTrack().getTrackTime() - pos.getCluster().getTime()) <= time_cuts_[0]);
+        vertex_cf_.apply("pos_track_cluster", fabs(pos.getTrack().getTrackTime() - pos.getCluster().getTime()) <= time_cuts_[1]);
         vertex_cf_.apply("ele_pos_track",
-                         abs(ele.getTrack().getTrackTime() - pos.getTrack().getTrackTime()) <= time_cuts_[2]);
+                         fabs(ele.getTrack().getTrackTime() - pos.getTrack().getTrackTime()) <= time_cuts_[2]);
         vertex_cf_.apply("ele_track_chi2ndf", ele.getTrack().getChi2Ndf() <= 20.0);
         vertex_cf_.apply("pos_track_chi2ndf", pos.getTrack().getChi2Ndf() <= 20.0);
         vertex_cf_.apply("electron_below_2pt9GeV", ele.getTrack().getP() <= 2.9);
@@ -355,9 +352,9 @@ bool PreselectAndCategorize2021::process(IEvent*) {
         vertex_cf_.apply("vtx_max_p_4pt0GeV", psum.Mag() <= 4.0);
 
         vertex_cf_.fill_nm1("positron_clusterE_above_0pt2GeV", pos.getCluster().getEnergy());
-        vertex_cf_.fill_nm1("ele_track_cluster", ele_track_cluster_tdiff);
-        vertex_cf_.fill_nm1("pos_track_cluster", pos_track_cluster_tdiff);
-        vertex_cf_.fill_nm1("ele_pos_track", abs(ele.getTrack().getTrackTime() - pos.getTrack().getTrackTime()));
+        vertex_cf_.fill_nm1("ele_track_cluster", fabs(ele.getTrack().getTrackTime() - pos.getCluster().getTime()));
+        vertex_cf_.fill_nm1("pos_track_cluster", fabs(pos.getTrack().getTrackTime() - pos.getCluster().getTime()));
+        vertex_cf_.fill_nm1("ele_pos_track", fabs(ele.getTrack().getTrackTime() - pos.getTrack().getTrackTime()));
         vertex_cf_.fill_nm1("ele_track_chi2ndf", ele.getTrack().getChi2Ndf());
         vertex_cf_.fill_nm1("pos_track_chi2ndf", pos.getTrack().getChi2Ndf());
         vertex_cf_.fill_nm1("electron_below_2pt9GeV", ele.getTrack().getP());
@@ -411,10 +408,8 @@ bool PreselectAndCategorize2021::process(IEvent*) {
 
     double ele_L1_iso{9999.0}, pos_L1_iso{9999.0};
     if (eleL1 && eleL2 && posL1 && posL2) {
-        if (ele_trk.isKalmanTrack()) {
-            ele_L1_iso = utils::getKalmanTrackL1Isolations(&ele_trk, &hits);
-            pos_L1_iso = utils::getKalmanTrackL1Isolations(&pos_trk, &hits);
-        }
+        ele_L1_iso = ele_trk.getIsolation(0);
+        pos_L1_iso = pos_trk.getIsolation(0);
     }
     bus_.set("ele_L1_iso", ele_L1_iso);
     bus_.set("pos_L1_iso", pos_L1_iso);
@@ -460,10 +455,20 @@ bool PreselectAndCategorize2021::process(IEvent*) {
     // vertical impact parameters
     double min_y0{9999.0}, max_y0err{-1.0};
 
-    abs(ele_trk.getZ0()) < abs(pos_trk.getZ0()) ? min_y0 = ele_trk.getZ0() : min_y0 = pos_trk.getZ0();
-    ele_trk.getZ0Err() > pos_trk.getZ0Err() ? max_y0err = ele_trk.getZ0Err() : max_y0err = pos_trk.getZ0Err();
+    if (fabs(ele_trk.getZ0()) < fabs(pos_trk.getZ0())) {
+        min_y0 = ele_trk.getZ0();
+    } else {
+        min_y0 = pos_trk.getZ0();
+    }
+    min_y0 = fabs(min_y0);
 
-    bus_.set("min_y0", abs(min_y0));
+    if (ele_trk.getZ0Err() > pos_trk.getZ0Err()) {
+        max_y0err = ele_trk.getZ0Err();
+    } else {
+        max_y0err = pos_trk.getZ0Err();
+    }
+
+    bus_.set("min_y0", min_y0);
     bus_.set("max_y0err", max_y0err);
 
     // set vertex object and tracks
@@ -592,6 +597,7 @@ void PreselectAndCategorize2021::finalize() {
     n_vertices_h_->Write();
     vertex_cf_.save();
     event_cf_.save();
+    outF_->Close();
 }
 
 DECLARE_PROCESSOR(PreselectAndCategorize2021);
