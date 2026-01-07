@@ -53,6 +53,7 @@ void PreselectAndCategorize2021::configure(const ParameterSet& parameters) {
     isData_ = parameters.getInteger("isData") != 0;
     isSimpSignal_ = parameters.getInteger("isSimpSignal") != 0;
     isApSignal_ = parameters.getInteger("isApSignal") != 0;
+    doTCValues_ = parameters.getInteger("doTCValues") != 0;
     if (isSimpSignal_ || isApSignal_) isSignal_ = true;
 }
 
@@ -173,7 +174,7 @@ void PreselectAndCategorize2021::setFile(TFile* out_file) {
         bus_.board_output<double>(output_tree_.get(), name);
     }
 
-    if (do_tc_values_) {
+    if (doTCValues_) {
         bus_.board_output<double>(output_tree_.get(), "tc_psum");
         bus_.board_output<double>(output_tree_.get(), "tc_invM");
     }
@@ -476,7 +477,7 @@ bool PreselectAndCategorize2021::process(IEvent*) {
     bus_.set("pos", pos);
 
     // target constrained vertex
-    if (do_tc_values_) {
+    if (doTCValues_) {
         int i_ele{-1}, i_pos{-1};
         for (int ipart = 0; ipart < TC_vtxs.at(tc_ivtx_passed)->getParticles().GetEntries(); ++ipart) {
             int pdg_id = ((Particle*)TC_vtxs.at(tc_ivtx_passed)->getParticles().At(ipart))->getPDG();

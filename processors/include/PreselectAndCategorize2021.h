@@ -34,7 +34,7 @@ class PreselectAndCategorize2021 : public PreselectAndCategorize {
     std::vector<double> determine_time_cuts(bool isData, int runNumber);
     std::vector<double> time_cuts_{6.9, 5.2, 9.0};
 
-    bool do_tc_values_{false};
+    bool doTCValues_{false};
     std::string vtxCollTC_{"TargetConstrainedV0Vertices_KF"};
 };
 
