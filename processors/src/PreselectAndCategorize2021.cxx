@@ -176,7 +176,7 @@ void PreselectAndCategorize2021::setFile(TFile* out_file) {
 
     if (doTCValues_) {
         bus_.board_output<double>(output_tree_.get(), "tc_psum");
-        bus_.board_output<double>(output_tree_.get(), "tc_invM");
+        bus_.board_output<float>(output_tree_.get(), "tc_invM");
     }
 
     if (bus_.has(mcColl_)) {
@@ -494,14 +494,14 @@ bool PreselectAndCategorize2021::process(IEvent*) {
         Particle tc_ele = *dynamic_cast<Particle*>(TC_vtxs.at(tc_ivtx_passed)->getParticles().At(i_ele));
         Particle tc_pos = *dynamic_cast<Particle*>(TC_vtxs.at(tc_ivtx_passed)->getParticles().At(i_pos));
 
-        TVector3 tc_ele_mom(tc_ele.getTrack().getMomentum()[0], tc_ele.getTrack().getMomentum()[1],
-                            tc_ele.getTrack().getMomentum()[2]);
-        TVector3 tc_pos_mom(tc_pos.getTrack().getMomentum()[0], tc_pos.getTrack().getMomentum()[1],
-                            tc_pos.getTrack().getMomentum()[2]);
+        TVector3 tc_ele_mom(tc_ele.getMomentum()[0], tc_ele.getMomentum()[1], tc_ele.getMomentum()[2]);
+        TVector3 tc_pos_mom(tc_pos.getMomentum()[0], tc_pos.getMomentum()[1], tc_pos.getMomentum()[2]);
         TVector3 tc_psum = tc_ele_mom + tc_pos_mom;
         bus_.set("tc_psum", tc_psum.Mag());
 
         bus_.set("tc_invM", TC_vtxs.at(tc_ivtx_passed)->getInvMass());
+        //bus_.set("tc_psum", 0.0);
+        //bus_.set("tc_invM", 0.0);
     }
     /**
      * This is where the output TTree is filled,
