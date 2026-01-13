@@ -42,9 +42,9 @@ preselect.parameters["isSimpSignal"] = 1 if ('simp' in options.sample) else 0
 preselect.parameters["isApSignal"] = 1 if ('ap' in options.sample) else 0
 preselect.parameters["beamPosCfg"] = "" # has already been done for these samples
 preselect.parameters["pSmearingFile"] = ""
-#preselect.parameters["v0ProjectionFitsCfg"] = ""
+preselect.parameters["vtxCollection"] = "TargetConstrainedV0Vertices_KF"
 preselect.parameters["v0ProjectionFitsCfg"] = file_in_hpstr(
-        'analysis/data/v0_projection_2021_config.json'
+        'analysis/data/v0_projection_2021_v9_config.json'
         if options.isData else
         'analysis/data/v0_projection_2021_mc_signal_config.json'
 )
@@ -63,8 +63,6 @@ preselect.parameters['trackBiasCfg'] = ""
 
 preselect.parameters['calTimeOffset'] = 37.3
 #preselect.parameters['calTimeOffset'] = 37.3 if options.isData else 24.
-
-preselect.parameters['doTCValues'] = 1
 
 p.sequence = [preselect]
 

@@ -16,7 +16,7 @@ YEAR="2021"
 INPUT_DATA_DIR="/sdf/data/hps/physics2021/data/recon/pass5_v9/merged"
 
 # Output configuration
-OUTPUT_DIR="/sdf/data/hps/physics2021/data/recon/pass5_v9/testrun"
+OUTPUT_DIR="/sdf/data/hps/physics2021/data/recon/pass5_v9/preselection/v1-TC-2026-01-13/"
 
 # File list configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,4 +27,5 @@ FILE_LIST="${DATA_LISTS_DIR}/all_files.list"
 LOG_DIR="${SCRIPT_DIR}/log"
 
 # hpstr configuration file
-HPSTR_CONFIG="config_2021.py"
+#HPSTR_CONFIG="config_displaced_2021.py"
+HPSTR_CONFIG="config_prompt_2021.py"
