@@ -268,28 +268,22 @@ bool PreselectAndCategorize2021::process(IEvent*) {
         }
 
         if (not v0proj_fits_.empty()) {
-            //std::cout << "Attempting to correct the track z0...." << std::endl;
-
             int run = eh.getRunNumber();
-	    int closest_run;
-	    for(auto entry : v0proj_fits_.items()){
-		int check_run = std::stoi(entry.key());
-		if(check_run > run)
-		    break;
-		else{
-		    closest_run = check_run;
-		}
-	    }
+            int closest_run;
+            for(auto entry : v0proj_fits_.items()){
+                int check_run = std::stoi(entry.key());
+                if(check_run > run)
+                    break;
+                else{
+                    closest_run = check_run;
+                }
+            }
 	    double elez0Mean = v0proj_fits_[std::to_string(closest_run)]["elez0_mean"];
             double posz0Mean = v0proj_fits_[std::to_string(closest_run)]["posz0_mean"];
 
-            //std::cout << "elez0Mean: " << elez0Mean << std::endl;
-            //std::cout << "Before: " << ele_trk.getZ0() << std::endl;
-            
             ele_trk.applyCorrection("z0", elez0Mean);
             pos_trk.applyCorrection("z0", posz0Mean);
 
-            //std::cout << "After: " << ele_trk.getZ0() << std::endl;
         }
 
         // smear track momentum
